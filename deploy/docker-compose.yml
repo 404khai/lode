@@ -1,0 +1,27 @@
+name: lode
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lode
+      POSTGRES_PASSWORD: lode
+      POSTGRES_DB: lode
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lode"]
+      interval: 2s
+      retries: 30
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+  adit:
+    build:
+      context: ..
+      args: { BIN: lode-adit }
+    command: ["-config", "/etc/lode/adit.yaml"]
+    volumes: ["./adit.example.yaml:/etc/lode/adit.yaml:ro"]
+    ports: ["9000:9000", "9090:9090"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  pgdata:
