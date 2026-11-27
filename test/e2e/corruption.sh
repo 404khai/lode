@@ -33,5 +33,5 @@ if aws s3 cp "s3://$bucket/obj" "$work/after" >/dev/null 2>"$work/err"; then
   fi
   exit 1
 fi
-grep -q "InternalError\|500" "$work/err" || { echo "FAIL: unexpected error: $(cat "$work/err")" >&2; exit 1; }
+grep -qiE "internal.?error|500" "$work/err" || { echo "FAIL: unexpected error: $(cat "$work/err")" >&2; exit 1; }
 echo "corruption: read of corrupted nugget was refused ($(head -c 120 "$work/err"))"
