@@ -156,7 +156,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 var unsupportedSubresources = []string{
 	"acl", "cors", "encryption", "lifecycle", "logging", "notification", "object-lock", "ownershipControls",
 	"policy", "policyStatus", "publicAccessBlock", "replication", "requestPayment", "restore", "retention",
-	"legal-hold", "select", "tagging", "torrent", "uploadId", "uploads", "versioning", "versions", "website",
+	"legal-hold", "select", "tagging", "torrent", "website",
 	"accelerate", "analytics", "intelligent-tiering", "inventory", "metrics", "attributes",
 }
 
@@ -188,6 +188,10 @@ func (s *Server) route(req *request) error {
 		}
 		switch r.Method {
 		case http.MethodPut:
+			if q.Has("versioning") {
+				req.op = "PutBucketVersioning"
+				return s.putBucketVersioning(req)
+			}
 			req.op = "CreateBucket"
 			return s.createBucket(req)
 		case http.MethodDelete:
@@ -201,6 +205,15 @@ func (s *Server) route(req *request) error {
 			case q.Has("location"):
 				req.op = "GetBucketLocation"
 				return s.getBucketLocation(req)
+			case q.Has("versioning"):
+				req.op = "GetBucketVersioning"
+				return s.getBucketVersioning(req)
+			case q.Has("versions"):
+				req.op = "ListObjectVersions"
+				return s.listObjectVersions(req)
+			case q.Has("uploads"):
+				req.op = "ListMultipartUploads"
+				return s.listUploads(req)
 			case q.Get("list-type") == "2":
 				req.op = "ListObjectsV2"
 				return s.listObjects(req, true)
@@ -220,17 +233,39 @@ func (s *Server) route(req *request) error {
 		if len(req.key) > 1024 {
 			return errKeyTooLong
 		}
+		uploadID := q.Get("uploadId")
 		switch r.Method {
+		case http.MethodPost:
+			switch {
+			case q.Has("uploads"):
+				req.op = "CreateMultipartUpload"
+				return s.createUpload(req)
+			case uploadID != "":
+				req.op = "CompleteMultipartUpload"
+				return s.completeUpload(req, uploadID)
+			}
 		case http.MethodPut:
+			if uploadID != "" {
+				req.op = "UploadPart"
+				return s.uploadPart(req, uploadID)
+			}
 			req.op = "PutObject"
 			return s.putObject(req)
 		case http.MethodGet:
+			if uploadID != "" {
+				req.op = "ListParts"
+				return s.listParts(req, uploadID)
+			}
 			req.op = "GetObject"
 			return s.getObject(req, false)
 		case http.MethodHead:
 			req.op = "HeadObject"
 			return s.getObject(req, true)
 		case http.MethodDelete:
+			if uploadID != "" {
+				req.op = "AbortMultipartUpload"
+				return s.abortUpload(req, uploadID)
+			}
 			req.op = "DeleteObject"
 			return s.deleteObject(req)
 		}
@@ -252,6 +287,18 @@ func (s *Server) toAPIError(req *request, err error) *apiError {
 		return errBucketOwned
 	case errors.Is(err, ledger.ErrBucketNotEmpty):
 		return errBucketNotEmpty
+	case errors.Is(err, ledger.ErrNoSuchVersion):
+		return errNoSuchVersion
+	case errors.Is(err, ledger.ErrNoSuchUpload):
+		return errNoSuchUpload
+	case errors.Is(err, ledger.ErrInvalidPart):
+		return errInvalidPart
+	case errors.Is(err, ledger.ErrInvalidPartOrder):
+		return errInvalidPartOrder
+	case errors.Is(err, ledger.ErrEntityTooSmall):
+		return errEntityTooSmall
+	case errors.Is(err, ledger.ErrPreconditionFailed):
+		return errPreconditionFailed
 	}
 	s.log.Error("internal error", "op", req.op, "bucket", req.bucket, "key", req.key, "request_id", req.id, "err", err)
 	return errInternal

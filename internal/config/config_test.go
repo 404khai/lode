@@ -62,3 +62,18 @@ func TestAccessKeyEnvAndValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTailingsDurations(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte("tailings:\n  grace: 1h\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LODE_TAILINGS_INTERVAL", "10s")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tailings.Grace.String() != "1h0m0s" || cfg.Tailings.Interval.String() != "10s" || cfg.Tailings.UploadExpiry.Hours() != 168 {
+		t.Fatalf("tailings = %+v", cfg.Tailings)
+	}
+}

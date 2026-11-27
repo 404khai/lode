@@ -1,0 +1,13 @@
+# Adit config for the s3-tests run: s3-tests cleans up as every configured
+# user, so all of their keys must exist.
+log: {level: info, format: text}
+adit:
+  listen: ":9000"
+  access_keys:
+    - {access_key: lode, secret_key: lodesecret}
+    - {access_key: lodealt, secret_key: lodealtsecret}
+    - {access_key: lodetenant, secret_key: lodetenantsecret}
+    - {access_key: lodeiam, secret_key: lodeiamsecret}
+    - {access_key: lodeiamroot, secret_key: lodeiamrootsecret}
+    - {access_key: lodeiamaltroot, secret_key: lodeiamaltrootsecret}
+metrics: {listen: ":9090"}

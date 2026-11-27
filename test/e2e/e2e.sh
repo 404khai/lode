@@ -50,11 +50,37 @@ grep -q "PRE data/" <<<"$listing" && grep -q "PRE tree/" <<<"$listing" && grep -
 aws s3 sync "s3://$bucket/tree" "$work/synced" >/dev/null
 diff -r "$work/tree" "$work/synced" >/dev/null && pass "sync down" || fail "sync differs"
 
+# Multipart: the CLI switches to multipart uploads at 8 MiB.
+head -c $((40 * 1024 * 1024 + 12345)) /dev/urandom >"$work/multi.bin"
+aws s3 cp "$work/multi.bin" "s3://$bucket/multi.bin" >/dev/null && pass "cp 40MiB up (multipart)"
+aws s3api head-object --bucket "$bucket" --key multi.bin | grep -q '"ETag": "\\"[0-9a-f]*-[0-9]*\\""' && pass "multipart ETag" || fail "multipart etag"
+aws s3 cp "s3://$bucket/multi.bin" "$work/multi.out" >/dev/null
+cmp -s "$work/multi.bin" "$work/multi.out" && pass "cp 40MiB down (identical)" || fail "multipart object differs"
+upload=$(aws s3api create-multipart-upload --bucket "$bucket" --key abandoned --query UploadId --output text)
+aws s3api list-multipart-uploads --bucket "$bucket" | grep -q "$upload" && pass "list-multipart-uploads"
+aws s3api abort-multipart-upload --bucket "$bucket" --key abandoned --upload-id "$upload" && pass "abort-multipart-upload"
+
+# Versioning.
+aws s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
+aws s3api get-bucket-versioning --bucket "$bucket" | grep -q Enabled && pass "versioning enabled"
+echo v1 >"$work/v"; v1=$(aws s3api put-object --bucket "$bucket" --key ver.txt --body "$work/v" --query VersionId --output text)
+echo v2 >"$work/v"; aws s3api put-object --bucket "$bucket" --key ver.txt --body "$work/v" >/dev/null
+aws s3api get-object --bucket "$bucket" --key ver.txt --version-id "$v1" "$work/v.out" >/dev/null
+[ "$(cat "$work/v.out")" = v1 ] && pass "get old version" || fail "old version"
+aws s3 rm "s3://$bucket/ver.txt" >/dev/null
+if aws s3api head-object --bucket "$bucket" --key ver.txt >/dev/null 2>&1; then fail "delete marker not applied"; fi
+[ "$(aws s3api list-object-versions --bucket "$bucket" --prefix ver.txt --query 'length(Versions)')" = 2 ] && pass "list-object-versions" || fail "versions"
+
 aws s3 rm "s3://$bucket/small.txt" >/dev/null && pass "rm"
 if aws s3api head-object --bucket "$bucket" --key small.txt >/dev/null 2>&1; then fail "object still exists after rm"; fi
 pass "read-after-delete returns 404"
 
 aws s3 rm --recursive "s3://$bucket" >/dev/null && pass "rm --recursive"
+# Versioned bucket: remove every version and marker before rb.
+for row in $(aws s3api list-object-versions --bucket "$bucket" --query '[Versions[], DeleteMarkers[]][][].[Key,VersionId]' --output text | tr '\t' '|'); do
+  aws s3api delete-object --bucket "$bucket" --key "${row%%|*}" --version-id "${row##*|}" >/dev/null
+done
+pass "deleted all versions"
 aws s3 rb "s3://$bucket" >/dev/null && pass "rb"
 
 echo "e2e: all checks passed"

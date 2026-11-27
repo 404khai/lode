@@ -4,16 +4,26 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Log     Log     `yaml:"log"`
-	Adit    Adit    `yaml:"adit"`
-	Metrics Metrics `yaml:"metrics"`
-	Ledger  Ledger  `yaml:"ledger"`
-	Vein    Vein    `yaml:"vein"`
+	Log      Log      `yaml:"log"`
+	Adit     Adit     `yaml:"adit"`
+	Metrics  Metrics  `yaml:"metrics"`
+	Ledger   Ledger   `yaml:"ledger"`
+	Vein     Vein     `yaml:"vein"`
+	Tailings Tailings `yaml:"tailings"`
+}
+
+// Tailings configures garbage collection.
+type Tailings struct {
+	Grace        time.Duration `yaml:"grace"`         // keep unreferenced nuggets this long
+	Interval     time.Duration `yaml:"interval"`      // time between passes
+	UploadExpiry time.Duration `yaml:"upload_expiry"` // abort multipart uploads older than this; 0 disables
+	CompactRatio float64       `yaml:"compact_ratio"` // compact segments at least this fraction dead
 }
 
 type Log struct {
@@ -52,6 +62,9 @@ func Default() Config {
 		Adit:    Adit{Listen: ":9000", Region: "us-east-1"},
 		Metrics: Metrics{Listen: ":9090"},
 		Vein:    Vein{DataDir: "./data"},
+		Tailings: Tailings{
+			Grace: 24 * time.Hour, Interval: 5 * time.Minute, UploadExpiry: 7 * 24 * time.Hour, CompactRatio: 0.5,
+		},
 	}
 }
 
@@ -85,6 +98,17 @@ func applyEnv(cfg *Config) {
 			*dst = v
 		}
 	}
+	for env, dst := range map[string]*time.Duration{
+		"LODE_TAILINGS_GRACE":         &cfg.Tailings.Grace,
+		"LODE_TAILINGS_INTERVAL":      &cfg.Tailings.Interval,
+		"LODE_TAILINGS_UPLOAD_EXPIRY": &cfg.Tailings.UploadExpiry,
+	} {
+		if v, ok := os.LookupEnv(env); ok {
+			if d, err := time.ParseDuration(v); err == nil {
+				*dst = d
+			}
+		}
+	}
 	ak, sk := os.Getenv("LODE_ACCESS_KEY"), os.Getenv("LODE_SECRET_KEY")
 	if ak != "" && sk != "" {
 		cfg.Adit.AccessKeys = append(cfg.Adit.AccessKeys, AccessKey{AccessKey: ak, SecretKey: sk})
@@ -98,6 +122,9 @@ func (c Config) Validate() error {
 	}
 	if len(c.Adit.AccessKeys) == 0 {
 		return fmt.Errorf("config: at least one adit.access_keys entry (or LODE_ACCESS_KEY/LODE_SECRET_KEY) is required")
+	}
+	if c.Tailings.Interval <= 0 {
+		return fmt.Errorf("config: tailings.interval must be positive")
 	}
 	for _, k := range c.Adit.AccessKeys {
 		if k.AccessKey == "" || k.SecretKey == "" {

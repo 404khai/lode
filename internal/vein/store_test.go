@@ -38,9 +38,7 @@ func TestPutGet(t *testing.T) {
 	}
 }
 
-// A nugget referenced by another object must survive the release of one
-// reference (AGENTS.md rule 5).
-func TestReferencedNuggetSurvivesRelease(t *testing.T) {
+func TestPutIsIdempotentAndDelete(t *testing.T) {
 	s := open(t, t.TempDir(), 0)
 	defer func() { _ = s.Close() }()
 	data := []byte("shared")
@@ -50,23 +48,80 @@ func TestReferencedNuggetSurvivesRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n, _ := s.Refs(id); n != 2 {
-		t.Fatalf("refs = %d", n)
+	if s.size != int64(len(data)) {
+		t.Fatalf("duplicate put wrote bytes: size=%d", s.size)
 	}
-	if err := s.Release(id); err != nil {
-		t.Fatal(err)
+	if ok, _ := s.Has(id); !ok {
+		t.Fatal("missing after put")
 	}
-	if got, err := s.Get(id); err != nil || !bytes.Equal(got, data) {
-		t.Fatalf("referenced nugget lost: %q %v", got, err)
-	}
-	if err := s.Release(id); err != nil {
+	if err := s.Delete(id); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Get(id); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound after last release, got %v", err)
+		t.Fatalf("want ErrNotFound after delete, got %v", err)
 	}
-	if err := s.Release(id); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("release of absent nugget: %v", err)
+	if err := s.Delete(id); err != nil {
+		t.Fatalf("delete of absent nugget: %v", err)
+	}
+}
+
+// Compaction must never lose a live nugget (AGENTS.md rule 5).
+func TestCompactKeepsLiveNuggets(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, dir, 100)
+	defer func() { _ = s.Close() }()
+	var live, dead []nugget.ID
+	for i := range 6 {
+		d := bytes.Repeat([]byte{byte('a' + i)}, 60) // one nugget per segment
+		id := nugget.Sum(d)
+		if err := s.Put(id, d); err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 0 {
+			dead = append(dead, id)
+		} else {
+			live = append(live, id)
+		}
+	}
+	// A segment holding one dead and one live nugget.
+	mixedLive, mixedDead := bytes.Repeat([]byte("L"), 40), bytes.Repeat([]byte("D"), 40)
+	_ = s.useSegment(s.activeN + 1)
+	for _, d := range [][]byte{mixedLive, mixedDead} {
+		if err := s.Put(nugget.Sum(d), d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live = append(live, nugget.Sum(mixedLive))
+	dead = append(dead, nugget.Sum(mixedDead))
+	_ = s.useSegment(s.activeN + 1)
+
+	for _, id := range dead {
+		if err := s.Delete(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := s.segments()
+	st, err := s.Compact(0.4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.segments()
+	if st.SegmentsRemoved != 4 || len(after) >= len(before) || st.BytesReclaimed != 3*60+40 {
+		t.Fatalf("stats = %+v, segments %d -> %d", st, len(before), len(after))
+	}
+	for _, id := range live {
+		if _, err := s.Get(id); err != nil {
+			t.Fatalf("live nugget lost by compaction: %v", err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open(t, dir, 100)
+	for _, id := range live {
+		if _, err := s.Get(id); err != nil {
+			t.Fatalf("live nugget lost after reopen: %v", err)
+		}
 	}
 }
 

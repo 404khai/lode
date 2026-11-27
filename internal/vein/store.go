@@ -1,14 +1,16 @@
 // Package vein implements a storage node's local nugget store: append-only
 // segment files on disk indexed by a Pebble database.
 //
-// On-disk layout under the data directory:
+// On-disk layout under the data directory (ADR 0001):
 //
 //	index/            Pebble DB: "n/"+id -> segment(u32) offset(u64) length(u32) refs(u32)
 //	segments/NNNNNNNN.seg  raw nugget bytes, appended and never rewritten
 //
 // A nugget's bytes are fsynced before its index entry is written, so an index
-// entry always points at durable data. Bytes orphaned by a crash between the
-// two steps are reclaimed by segment compaction (Tailings).
+// entry always points at durable data. The Ledger owns reference counts
+// (ADR 0002): the vein only records presence, and nuggets are removed by
+// Tailings. Space held by removed or crash-orphaned bytes is reclaimed by
+// Compact, which rewrites live nuggets out of mostly-dead segments.
 package vein
 
 import (
@@ -45,6 +47,8 @@ const (
 	keyPrefix          = "n/"
 )
 
+// entry is an index value. refs is always 1 since format v1 moved reference
+// counting to the Ledger; the field is kept for format compatibility.
 type entry struct {
 	segment uint32
 	offset  uint64
@@ -92,7 +96,7 @@ type Store struct {
 	bus     *events.Bus
 	db      *pebble.DB
 
-	mu      sync.Mutex // serialises writes and segment rotation
+	mu      sync.Mutex // serialises writes, deletes, rotation and compaction
 	active  *os.File
 	activeN uint32
 	size    int64
@@ -100,8 +104,8 @@ type Store struct {
 	rmu     sync.RWMutex
 	readers map[uint32]*os.File
 
-	puts, dedups, gets, corrupt, releases prometheus.Counter
-	bytesWritten                          prometheus.Counter
+	puts, dedups, gets, corrupt, deletes prometheus.Counter
+	bytesWritten, bytesReclaimed         prometheus.Counter
 }
 
 // Open opens or creates a store in opts.Dir.
@@ -128,18 +132,19 @@ func Open(opts Options) (*Store, error) {
 		return f.NewCounter(prometheus.CounterOpts{Namespace: "lode", Subsystem: "vein", Name: name, Help: help})
 	}
 	s := &Store{
-		dir:          opts.Dir,
-		segSize:      opts.SegmentSize,
-		log:          opts.Logger,
-		bus:          opts.Events,
-		db:           db,
-		readers:      make(map[uint32]*os.File),
-		puts:         counter("nugget_puts_total", "Nuggets written to disk."),
-		dedups:       counter("nugget_dedup_total", "Puts satisfied by an existing nugget."),
-		gets:         counter("nugget_gets_total", "Nugget reads."),
-		corrupt:      counter("nugget_corrupt_total", "Reads that failed hash verification."),
-		releases:     counter("nugget_releases_total", "Nugget references released."),
-		bytesWritten: counter("bytes_written_total", "Nugget bytes appended to segments."),
+		dir:            opts.Dir,
+		segSize:        opts.SegmentSize,
+		log:            opts.Logger,
+		bus:            opts.Events,
+		db:             db,
+		readers:        make(map[uint32]*os.File),
+		puts:           counter("nugget_puts_total", "Nuggets written to disk."),
+		dedups:         counter("nugget_dedup_total", "Puts satisfied by an existing nugget."),
+		gets:           counter("nugget_gets_total", "Nugget reads."),
+		corrupt:        counter("nugget_corrupt_total", "Reads that failed hash verification."),
+		deletes:        counter("nugget_deletes_total", "Nuggets removed from the index."),
+		bytesWritten:   counter("bytes_written_total", "Nugget bytes appended to segments."),
+		bytesReclaimed: counter("bytes_reclaimed_total", "Segment bytes freed by compaction."),
 	}
 	if err := s.openActive(); err != nil {
 		_ = db.Close()
@@ -152,24 +157,30 @@ func (s *Store) segPath(n uint32) string {
 	return filepath.Join(s.dir, "segments", fmt.Sprintf("%08d.seg", n))
 }
 
-func (s *Store) openActive() error {
+func (s *Store) segments() ([]uint32, error) {
 	names, err := filepath.Glob(filepath.Join(s.dir, "segments", "*.seg"))
+	if err != nil {
+		return nil, err
+	}
+	var nums []uint32
+	for _, name := range names {
+		n, err := strconv.ParseUint(strings.TrimSuffix(filepath.Base(name), ".seg"), 10, 32)
+		if err == nil {
+			nums = append(nums, uint32(n))
+		}
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+	return nums, nil
+}
+
+func (s *Store) openActive() error {
+	nums, err := s.segments()
 	if err != nil {
 		return err
 	}
-	var last uint32
-	nums := make([]int, 0, len(names))
-	for _, name := range names {
-		n, err := strconv.Atoi(strings.TrimSuffix(filepath.Base(name), ".seg"))
-		if err == nil {
-			nums = append(nums, n)
-		}
-	}
-	sort.Ints(nums)
+	last := uint32(1)
 	if len(nums) > 0 {
-		last = uint32(nums[len(nums)-1]) // #nosec G115 -- segment numbers are written by us
-	} else {
-		last = 1
+		last = nums[len(nums)-1]
 	}
 	return s.useSegment(last)
 }
@@ -205,8 +216,8 @@ func (s *Store) lookup(id nugget.ID) (entry, error) {
 	return decodeEntry(v)
 }
 
-// Put stores data under id, or adds a reference if it is already stored.
-// data must hash to id.
+// Put stores data under id. Storing a nugget that is already present is a
+// no-op. data must hash to id.
 func (s *Store) Put(id nugget.ID, data []byte) error {
 	if nugget.Sum(data) != id {
 		return fmt.Errorf("vein: data does not match nugget id %s", id)
@@ -214,36 +225,42 @@ func (s *Store) Put(id nugget.ID, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	e, err := s.lookup(id)
+	_, err := s.lookup(id)
 	switch {
 	case err == nil:
-		e.refs++
 		s.dedups.Inc()
-		return s.db.Set(indexKey(id), e.encode(), pebble.Sync)
+		return nil
 	case !errors.Is(err, ErrNotFound):
 		return err
 	}
-
-	if s.size > 0 && s.size+int64(len(data)) > s.segSize {
-		if err := s.useSegment(s.activeN + 1); err != nil {
-			return err
-		}
+	e, err := s.appendLocked(data)
+	if err != nil {
+		return err
 	}
-	off := s.size
-	if _, err := s.active.Write(data); err != nil {
-		return fmt.Errorf("vein: append: %w", err)
-	}
-	if err := s.active.Sync(); err != nil {
-		return fmt.Errorf("vein: fsync: %w", err)
-	}
-	s.size += int64(len(data))
-	e = entry{segment: s.activeN, offset: uint64(off), length: uint32(len(data)), refs: 1} // #nosec G115 -- nuggets are bounded
 	if err := s.db.Set(indexKey(id), e.encode(), pebble.Sync); err != nil {
 		return fmt.Errorf("vein: index: %w", err)
 	}
 	s.puts.Inc()
-	s.bytesWritten.Add(float64(len(data)))
 	return nil
+}
+
+// appendLocked appends data to the active segment and fsyncs it. s.mu must be held.
+func (s *Store) appendLocked(data []byte) (entry, error) {
+	if s.size > 0 && s.size+int64(len(data)) > s.segSize {
+		if err := s.useSegment(s.activeN + 1); err != nil {
+			return entry{}, err
+		}
+	}
+	off := s.size
+	if _, err := s.active.Write(data); err != nil {
+		return entry{}, fmt.Errorf("vein: append: %w", err)
+	}
+	if err := s.active.Sync(); err != nil {
+		return entry{}, fmt.Errorf("vein: fsync: %w", err)
+	}
+	s.size += int64(len(data))
+	s.bytesWritten.Add(float64(len(data)))
+	return entry{segment: s.activeN, offset: uint64(off), length: uint32(len(data)), refs: 1}, nil // #nosec G115 -- nuggets are bounded
 }
 
 func (s *Store) reader(n uint32) (*os.File, error) {
@@ -269,11 +286,28 @@ func (s *Store) reader(n uint32) (*os.File, error) {
 // Get returns the nugget's bytes after verifying them against id. It never
 // returns bytes that fail verification.
 func (s *Store) Get(id nugget.ID) ([]byte, error) {
+	s.gets.Inc()
+	for attempt := 0; ; attempt++ {
+		buf, err := s.read(id)
+		// Compaction may have moved the nugget between lookup and read.
+		if attempt == 0 && (errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrClosed)) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if nugget.Sum(buf) != id {
+			return nil, s.markCorrupt(id, "hash mismatch")
+		}
+		return buf, nil
+	}
+}
+
+func (s *Store) read(id nugget.ID) ([]byte, error) {
 	e, err := s.lookup(id)
 	if err != nil {
 		return nil, err
 	}
-	s.gets.Inc()
 	f, err := s.reader(e.segment)
 	if err != nil {
 		return nil, err
@@ -285,9 +319,6 @@ func (s *Store) Get(id nugget.ID) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("vein: read: %w", err)
 	}
-	if nugget.Sum(buf) != id {
-		return nil, s.markCorrupt(id, "hash mismatch")
-	}
 	return buf, nil
 }
 
@@ -298,30 +329,142 @@ func (s *Store) markCorrupt(id nugget.ID, reason string) error {
 	return fmt.Errorf("%w: %s (%s)", ErrCorrupt, id, reason)
 }
 
-// Release drops one reference to id. When the last reference goes the index
-// entry is removed; the bytes stay in the segment until compaction.
-func (s *Store) Release(id nugget.ID) error {
+// Delete removes id from the index. Deleting an absent nugget is not an
+// error. Only Tailings calls this, after the Ledger confirms the nugget is
+// unreferenced. The bytes stay in the segment until Compact.
+func (s *Store) Delete(id nugget.ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, err := s.lookup(id)
-	if err != nil {
+	if _, err := s.lookup(id); errors.Is(err, ErrNotFound) {
+		return nil
+	} else if err != nil {
 		return err
 	}
-	s.releases.Inc()
-	if e.refs > 1 {
-		e.refs--
-		return s.db.Set(indexKey(id), e.encode(), pebble.Sync)
-	}
+	s.deletes.Inc()
 	return s.db.Delete(indexKey(id), pebble.Sync)
 }
 
-// Refs reports the reference count of id (0 if absent).
-func (s *Store) Refs(id nugget.ID) (uint32, error) {
-	e, err := s.lookup(id)
+// Has reports whether id is stored.
+func (s *Store) Has(id nugget.ID) (bool, error) {
+	_, err := s.lookup(id)
 	if errors.Is(err, ErrNotFound) {
-		return 0, nil
+		return false, nil
 	}
-	return e.refs, err
+	return err == nil, err
+}
+
+// CompactStats reports what a compaction did.
+type CompactStats struct {
+	SegmentsRemoved int
+	BytesReclaimed  int64
+	NuggetsMoved    int
+}
+
+// Compact rewrites the live nuggets of every sealed segment whose dead
+// fraction is at least minDead (0..1) into the active segment, then removes
+// the old segment. Live nuggets are copied, fsynced and re-indexed before
+// their old segment is deleted; a segment holding a corrupt live nugget is
+// left untouched so Assay and Smelter can deal with it.
+func (s *Store) Compact(minDead float64) (CompactStats, error) {
+	var st CompactStats
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	live := map[uint32][]nugget.ID{}
+	liveBytes := map[uint32]int64{}
+	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte(keyPrefix), UpperBound: []byte("n0")})
+	if err != nil {
+		return st, err
+	}
+	for it.First(); it.Valid(); it.Next() {
+		e, derr := decodeEntry(it.Value())
+		if derr != nil {
+			_ = it.Close()
+			return st, derr
+		}
+		id, ierr := nugget.FromBytes(it.Key()[len(keyPrefix):])
+		if ierr != nil {
+			_ = it.Close()
+			return st, ierr
+		}
+		live[e.segment] = append(live[e.segment], id)
+		liveBytes[e.segment] += int64(e.length)
+	}
+	if err := it.Close(); err != nil {
+		return st, err
+	}
+
+	nums, err := s.segments()
+	if err != nil {
+		return st, err
+	}
+	for _, n := range nums {
+		if n == s.activeN {
+			continue
+		}
+		fi, err := os.Stat(s.segPath(n))
+		if err != nil {
+			return st, err
+		}
+		size := fi.Size()
+		if size == 0 || float64(size-liveBytes[n])/float64(size) < minDead {
+			continue
+		}
+		ok, err := s.evacuateLocked(n, live[n])
+		if err != nil {
+			return st, err
+		}
+		if !ok {
+			continue
+		}
+		s.rmu.Lock()
+		if f := s.readers[n]; f != nil {
+			_ = f.Close()
+			delete(s.readers, n)
+		}
+		s.rmu.Unlock()
+		if err := os.Remove(s.segPath(n)); err != nil {
+			return st, err
+		}
+		reclaimed := size - liveBytes[n]
+		st.SegmentsRemoved++
+		st.NuggetsMoved += len(live[n])
+		st.BytesReclaimed += reclaimed
+		s.bytesReclaimed.Add(float64(reclaimed))
+	}
+	return st, nil
+}
+
+// evacuateLocked copies segment n's live nuggets to the active segment. ok is
+// false (and nothing changes) if any of them is corrupt.
+func (s *Store) evacuateLocked(n uint32, ids []nugget.ID) (bool, error) {
+	data := make([][]byte, len(ids))
+	for i, id := range ids {
+		b, err := s.read(id)
+		if errors.Is(err, ErrCorrupt) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if nugget.Sum(b) != id {
+			s.log.Warn("compaction skipped segment with corrupt nugget", "segment", n, "nugget", id.String())
+			return false, nil
+		}
+		data[i] = b
+	}
+	batch := s.db.NewBatch()
+	defer func() { _ = batch.Close() }()
+	for i, id := range ids {
+		e, err := s.appendLocked(data[i])
+		if err != nil {
+			return false, err
+		}
+		if err := batch.Set(indexKey(id), e.encode(), nil); err != nil {
+			return false, err
+		}
+	}
+	return true, batch.Commit(pebble.Sync)
 }
 
 // Close flushes and closes the store.

@@ -3,3 +3,4 @@
 *.test
 coverage.out
 .DS_Store
+/test/s3compat/.s3-tests/

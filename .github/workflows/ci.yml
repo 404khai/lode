@@ -51,9 +51,38 @@ jobs:
         run: make e2e
       - name: Corrupted nugget is never served
         run: make corruption
+      - name: Same 1 GiB file uploaded twice is stored once
+        run: DEDUP_SIZE_MB=1024 make dedup
       - name: Metrics exported
         run: curl -sf localhost:9090/metrics | grep -E 'lode_adit_requests_total|lode_vein_nugget_corrupt_total'
       - if: failure()
         run: docker compose -f deploy/docker-compose.yml logs adit
       - if: always()
         run: make down
+
+  s3compat:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: lode, POSTGRES_PASSWORD: lode, POSTGRES_DB: lode }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U lode" --health-interval 2s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: make build
+      - name: Start Adit
+        run: |
+          LODE_LEDGER_DSN=postgres://lode:lode@localhost:5432/lode?sslmode=disable LODE_VEIN_DATA_DIR=$RUNNER_TEMP/vein \
+            nohup ./bin/lode-adit -config test/s3compat/adit.yaml >"$RUNNER_TEMP/adit.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:9090/healthz && exit 0; sleep 1; done
+          cat "$RUNNER_TEMP/adit.log"; exit 1
+      - name: ceph/s3-tests subset
+        run: make s3compat
+      - if: failure()
+        run: cat "$RUNNER_TEMP/adit.log"

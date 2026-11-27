@@ -2,9 +2,12 @@ package adit
 
 import (
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/404khai/lode/internal/ledger"
 )
 
 const maxXMLBody = 1 << 20
@@ -68,7 +71,12 @@ func (s *Server) createBucket(req *request) error {
 	if _, err := s.readSmallBody(req); err != nil {
 		return err
 	}
-	if err := s.ledger.CreateBucket(req.r.Context(), req.bucket); err != nil {
+	err := s.ledger.CreateBucket(req.r.Context(), req.bucket)
+	// In us-east-1, S3 answers 200 when you re-create a bucket you own.
+	if errors.Is(err, ledger.ErrBucketExists) && s.region == "us-east-1" {
+		err = nil
+	}
+	if err != nil {
 		return err
 	}
 	s.emit("bucket.created", map[string]any{"bucket": req.bucket})
