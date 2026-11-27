@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package lode.v1;
+
+option go_package = "github.com/404khai/lode/gen/lode/v1;lodev1";
+
+// HealthService is implemented by every Lode daemon.
+service HealthService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_SERVING = 1;
+    STATUS_NOT_SERVING = 2;
+  }
+  Status status = 1;
+  string version = 2;
+}

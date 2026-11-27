@@ -1,0 +1,42 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: make build
+      - run: make test
+      - uses: golangci/golangci-lint-action@v8
+        with: { version: latest }
+
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          lint: true
+          format: false
+          breaking: ${{ github.event_name == 'pull_request' }}
+          breaking_against: ${{ github.event.repository.clone_url }}#branch=main
+          push: false
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make up
+      - name: Adit returns 501 NotImplemented
+        run: |
+          for i in $(seq 1 30); do curl -sf localhost:9090/healthz && break; sleep 1; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' localhost:9000/)
+          test "$code" = 501
+          curl -sf localhost:9090/metrics | grep -q lode_adit_requests_total
+      - if: always()
+        run: make down

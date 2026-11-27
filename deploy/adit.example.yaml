@@ -1,0 +1,10 @@
+log:
+  level: info
+  format: json
+adit:
+  listen: ":9000"
+  region: us-east-1
+metrics:
+  listen: ":9090"
+ledger:
+  dsn: postgres://lode:lode@postgres:5432/lode?sslmode=disable
