@@ -42,3 +42,23 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestAccessKeyEnvAndValidate(t *testing.T) {
+	cfg := Default()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("empty config should not validate")
+	}
+	t.Setenv("LODE_ACCESS_KEY", "ak")
+	t.Setenv("LODE_SECRET_KEY", "sk")
+	t.Setenv("LODE_LEDGER_DSN", "postgres://x")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Adit.AccessKeys) != 1 || cfg.Adit.AccessKeys[0].SecretKey != "sk" {
+		t.Fatalf("keys = %+v", cfg.Adit.AccessKeys)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

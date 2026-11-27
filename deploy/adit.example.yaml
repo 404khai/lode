@@ -4,7 +4,13 @@ log:
 adit:
   listen: ":9000"
   region: us-east-1
+  # Static SigV4 credentials. LODE_ACCESS_KEY / LODE_SECRET_KEY add one more.
+  access_keys:
+    - access_key: lode
+      secret_key: lodesecret
 metrics:
   listen: ":9090"
 ledger:
   dsn: postgres://lode:lode@postgres:5432/lode?sslmode=disable
+vein:
+  data_dir: /data

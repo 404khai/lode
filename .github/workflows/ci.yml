@@ -7,6 +7,15 @@ on:
 jobs:
   go:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: lode, POSTGRES_PASSWORD: lode, POSTGRES_DB: lode_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U lode" --health-interval 2s --health-retries 30
+    env:
+      LODE_TEST_DSN: postgres://lode:lode@localhost:5432/lode_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -29,16 +38,22 @@ jobs:
           push: false
           pr_comment: false
 
-  compose:
+  e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: make up
-      - name: Adit returns 501 NotImplemented
+      - name: Wait for Adit
         run: |
-          for i in $(seq 1 30); do curl -sf localhost:9090/healthz && break; sleep 1; done
-          code=$(curl -s -o /dev/null -w '%{http_code}' localhost:9000/)
-          test "$code" = 501
-          curl -sf localhost:9090/metrics | grep -q lode_adit_requests_total
+          for i in $(seq 1 60); do curl -sf localhost:9090/healthz && exit 0; sleep 1; done
+          docker compose -f deploy/docker-compose.yml logs adit; exit 1
+      - name: aws CLI end-to-end
+        run: make e2e
+      - name: Corrupted nugget is never served
+        run: make corruption
+      - name: Metrics exported
+        run: curl -sf localhost:9090/metrics | grep -E 'lode_adit_requests_total|lode_vein_nugget_corrupt_total'
+      - if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs adit
       - if: always()
         run: make down
