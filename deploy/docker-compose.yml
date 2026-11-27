@@ -18,10 +18,13 @@ services:
       context: ..
       args: { BIN: lode-adit }
     command: ["-config", "/etc/lode/adit.yaml"]
-    volumes: ["./adit.example.yaml:/etc/lode/adit.yaml:ro"]
+    volumes:
+      - ./adit.example.yaml:/etc/lode/adit.yaml:ro
+      - veindata:/data
     ports: ["9000:9000", "9090:9090"]
     depends_on:
       postgres: { condition: service_healthy }
 
 volumes:
   pgdata:
+  veindata:

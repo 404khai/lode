@@ -82,7 +82,7 @@ reports/           graft usage reports (graft_report_lode_<topic>.md)
 cmd/               binaries (lode, lode-adit, lode-vein, lode-foreman)
 internal/          all packages listed in §1
 proto/             gRPC definitions (buf-managed)
-migrations/        Postgres migrations (goose), numbered, never edited after merge
+migrations/        Postgres migrations (embedded; applied by internal/ledger under an advisory lock), numbered, never edited after merge
 web/lantern/       explorer UI (TypeScript, Vite, D3/react-flow)
 deploy/            docker-compose, Dockerfiles, example configs
 test/e2e/          multi-node tests using docker compose + chaos helpers
@@ -94,11 +94,12 @@ docs/adr/          architecture decision records
 
 ```bash
 make build            # all binaries
-make test             # unit tests (go test ./... -race)
+make test             # unit tests (go test ./... -race); set LODE_TEST_DSN=postgres://... to run Ledger/Adit integration tests
 make lint             # golangci-lint + buf lint
 make proto            # regenerate gRPC code (buf generate)
 make up               # docker compose: postgres + 1 adit + 4 veins + foreman + lantern
-make e2e              # e2e suite against `make up`
+make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
+make corruption       # corrupts a nugget on the compose vein and checks it is never served
 make s3compat         # S3 compatibility suite
 make chaos            # kills/partitions veins while e2e runs
 ```
@@ -137,7 +138,7 @@ phase's exit criteria pass in CI.
 - Adit: `CreateBucket`, `DeleteBucket`, `ListBuckets`, `PutObject`, `GetObject` (incl. `Range`), `HeadObject`, `DeleteObject`, `ListObjectsV2`.
 - SigV4 auth with static access keys.
 - Checksums: BLAKE3 per nugget, MD5 ETag, honour `Content-MD5` and `x-amz-checksum-sha256`.
-- **Exit:** `aws s3 cp/ls/rm` work against Adit; corrupted nugget on disk returns an error, never wrong bytes.
+- **Exit:** `aws s3 cp/ls/rm` work against Adit; corrupted nugget on disk returns an error, never wrong bytes. ✅
 
 ### Phase 2 — Chunking, dedup, multipart, versioning
 - FastCDC content-defined chunking; identical nuggets stored once (refcount in Ledger, authoritative).
