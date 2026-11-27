@@ -24,6 +24,7 @@ import (
 	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/logging"
+	"github.com/404khai/lode/internal/tailings"
 	"github.com/404khai/lode/internal/vein"
 	"github.com/404khai/lode/internal/version"
 )
@@ -108,6 +109,15 @@ func run() error {
 		Logger: log, Registerer: reg, Ledger: led, Vein: store, Events: bus,
 		Region: cfg.Adit.Region, Credentials: creds,
 	})
+
+	gc := tailings.New(tailings.Options{
+		Ledger: led, Vein: store, Logger: log.With("component", "tailings"), Registerer: reg, Events: bus,
+		Grace: cfg.Tailings.Grace, Interval: cfg.Tailings.Interval,
+		UploadExpiry: cfg.Tailings.UploadExpiry, CompactRatio: cfg.Tailings.CompactRatio,
+	})
+	gcDone := make(chan struct{})
+	go func() { defer close(gcDone); gc.Run(ctx) }()
+	defer func() { stop(); <-gcDone }()
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

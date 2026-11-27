@@ -12,6 +12,7 @@ import (
 	"hash/crc32"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,10 +36,11 @@ const (
 )
 
 type harness struct {
-	t    *testing.T
-	ts   *httptest.Server
-	vein *vein.Store
-	dir  string
+	t      *testing.T
+	ts     *httptest.Server
+	vein   *vein.Store
+	ledger *ledger.Ledger
+	dir    string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -71,10 +73,11 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	led := ledger.New(pool)
 	srv := New(Options{
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Registerer:  reg,
-		Ledger:      ledger.New(pool),
+		Ledger:      led,
 		Vein:        store,
 		Credentials: map[string]string{testAK: testSK},
 	})
@@ -86,7 +89,7 @@ func newHarness(t *testing.T) *harness {
 		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close()
 	})
-	return &harness{t: t, ts: ts, vein: store, dir: dir}
+	return &harness{t: t, ts: ts, vein: store, ledger: led, dir: dir}
 }
 
 // sign adds a SigV4 Authorization header. payloadHash defaults to the body's SHA-256.
@@ -131,6 +134,24 @@ func (h *harness) do(method, path string, body []byte, hdr map[string]string) *h
 	return resp
 }
 
+func randomBytes(n int) []byte {
+	b := make([]byte, n)
+	r := rand.New(rand.NewPCG(uint64(n), 7))
+	for i := range b {
+		b[i] = byte(r.Uint32())
+	}
+	return b
+}
+
+// referenced counts nuggets the Ledger holds references to.
+func (h *harness) referenced() int {
+	var n int
+	if err := h.ledger.Pool().QueryRow(context.Background(), "SELECT count(*) FROM nuggets WHERE refs > 0").Scan(&n); err != nil {
+		h.t.Fatal(err)
+	}
+	return n
+}
+
 func readAll(t *testing.T, resp *http.Response) []byte {
 	t.Helper()
 	defer func() { _ = resp.Body.Close() }()
@@ -160,7 +181,7 @@ func TestBucketOperations(t *testing.T) {
 	h := newHarness(t)
 	h.expect(h.do("PUT", "/Bad_Name", nil, nil), 400, "InvalidBucketName")
 	h.expect(h.do("PUT", "/photos", nil, nil), 200, "")
-	h.expect(h.do("PUT", "/photos", nil, nil), 409, "BucketAlreadyOwnedByYou")
+	h.expect(h.do("PUT", "/photos", nil, nil), 200, "") // us-east-1 semantics
 	h.expect(h.do("HEAD", "/photos", nil, nil), 200, "")
 	h.expect(h.do("HEAD", "/nope", nil, nil), 404, "")
 
@@ -173,7 +194,7 @@ func TestBucketOperations(t *testing.T) {
 	h.expect(h.do("DELETE", "/photos/a", nil, nil), 204, "")
 	h.expect(h.do("DELETE", "/photos", nil, nil), 204, "")
 	h.expect(h.do("DELETE", "/photos", nil, nil), 404, "NoSuchBucket")
-	h.expect(h.do("GET", "/photos?versioning", nil, nil), 501, "NotImplemented")
+	h.expect(h.do("GET", "/photos?tagging", nil, nil), 501, "NotImplemented")
 }
 
 func TestPutGetObject(t *testing.T) {
@@ -197,8 +218,8 @@ func TestPutGetObject(t *testing.T) {
 		t.Fatalf("bad checksum accepted: %d", resp.StatusCode)
 	}
 	_ = readAll(t, resp)
-	if n, _ := h.vein.Refs(nugget.Sum(data[:nugget.Size])); n != 0 {
-		t.Fatalf("failed put leaked a nugget reference: refs=%d", n)
+	if n := h.referenced(); n != 0 {
+		t.Fatalf("failed put left %d referenced nuggets", n)
 	}
 
 	c := crc32.ChecksumIEEE(data)
@@ -265,18 +286,18 @@ func TestDedupAndOverwriteReleasesNuggets(t *testing.T) {
 	id := nugget.Sum(data)
 	h.expect(h.do("PUT", "/bkt/one", data, nil), 200, "")
 	h.expect(h.do("PUT", "/bkt/two", data, nil), 200, "")
-	if n, _ := h.vein.Refs(id); n != 2 {
+	if n, _ := h.ledger.NuggetRefs(context.Background(), id); n != 2 {
 		t.Fatalf("refs = %d, want 2", n)
 	}
 	h.expect(h.do("PUT", "/bkt/one", []byte("new bytes"), nil), 200, "")
-	if n, _ := h.vein.Refs(id); n != 1 {
+	if n, _ := h.ledger.NuggetRefs(context.Background(), id); n != 1 {
 		t.Fatalf("overwrite should release old nugget: refs = %d", n)
 	}
 	if got := h.expect(h.do("GET", "/bkt/two", nil, nil), 200, ""); !bytes.Equal(got, data) {
 		t.Fatal("shared nugget lost after overwrite of another key")
 	}
 	h.expect(h.do("DELETE", "/bkt/two", nil, nil), 204, "")
-	if n, _ := h.vein.Refs(id); n != 0 {
+	if n, _ := h.ledger.NuggetRefs(context.Background(), id); n != 0 {
 		t.Fatalf("refs after delete = %d", n)
 	}
 	h.expect(h.do("DELETE", "/bkt/two", nil, nil), 204, "")
@@ -441,10 +462,7 @@ func TestAuthRequired(t *testing.T) {
 func TestCorruptionMidStreamAborts(t *testing.T) {
 	h := newHarness(t)
 	h.expect(h.do("PUT", "/bkt", nil, nil), 200, "")
-	data := make([]byte, nugget.Size+1000)
-	for i := range data {
-		data[i] = byte(i)
-	}
+	data := randomBytes(2*nugget.MaxSize + 1000)
 	h.expect(h.do("PUT", "/bkt/big", data, nil), 200, "")
 
 	segs, _ := filepath.Glob(filepath.Join(h.dir, "segments", "*.seg"))
@@ -452,7 +470,7 @@ func TestCorruptionMidStreamAborts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteAt([]byte{0xff, 0xff}, nugget.Size+10); err != nil {
+	if _, err := f.WriteAt([]byte{0xff, 0xff}, int64(len(data)-100)); err != nil { // inside the last nugget
 		t.Fatal(err)
 	}
 	_ = f.Close()

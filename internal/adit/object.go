@@ -1,14 +1,9 @@
 package adit
 
 import (
-	"crypto/md5" // #nosec G501 -- S3 ETag and Content-MD5, not used for security
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
-	"errors"
 	"fmt"
-	"hash"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -63,119 +58,52 @@ func objectHeaders(r *http.Request) (map[string]string, error) {
 	return h, nil
 }
 
-func (s *Server) releaseAll(ids []nugget.ID) {
-	for _, id := range ids {
-		if err := s.vein.Release(id); err != nil {
-			s.log.Error("release nugget", "nugget", id.String(), "err", err)
-		}
+// setVersionHeader adds x-amz-version-id for buckets that have ever had
+// versioning enabled.
+func setVersionHeader(h http.Header, versioning, versionID string) {
+	if versioning != "" && versionID != "" {
+		h.Set("x-amz-version-id", versionID)
 	}
 }
 
-func (s *Server) putObject(req *request) (err error) {
-	r := req.r
-	headers, err := objectHeaders(r)
+// setWriteVersionHeader is setVersionHeader for write responses, which (like
+// S3) omit the "null" version ID.
+func setWriteVersionHeader(h http.Header, versioning, versionID string) {
+	if versionID != ledger.NullVersion {
+		setVersionHeader(h, versioning, versionID)
+	}
+}
+
+func writeCondition(r *http.Request) ledger.Condition {
+	return ledger.Condition{IfMatch: r.Header.Get("If-Match"), IfNoneMatch: r.Header.Get("If-None-Match")}
+}
+
+func (s *Server) putObject(req *request) error {
+	headers, err := objectHeaders(req.r)
 	if err != nil {
 		return err
 	}
-	var md5Want []byte
-	if v := r.Header.Get("Content-MD5"); v != "" {
-		if md5Want, err = base64.StdEncoding.DecodeString(v); err != nil || len(md5Want) != md5.Size {
-			return errInvalidDigest
-		}
-	}
-	sum, aerr := requestChecksum(r)
-	if aerr != nil {
-		return aerr
-	}
-	body, err := s.payloadReader(req)
+	in, err := s.ingest(req, maxPutSize)
 	if err != nil {
 		return err
 	}
-	if body.size < 0 {
-		return errMissingLength
+	v := ledger.Version{
+		Size: in.size, ETag: `"` + hex.EncodeToString(in.md5) + `"`, Headers: headers,
+		ChunkSize: nugget.AvgSize, Nuggets: in.nuggets,
 	}
-	if body.size > maxPutSize {
-		return errEntityTooLarge
+	if in.sum != nil {
+		v.ChecksumAlgorithm, v.ChecksumValue = in.sum.algorithm, in.sum.expected
 	}
-
-	md5h := md5.New() // #nosec G401
-	hashers := []hash.Hash{md5h}
-	if sum != nil {
-		hashers = append(hashers, sum.h)
-	}
-
-	// Nuggets written so far hold a reference on the vein; release them if
-	// the object never commits.
-	var stored []nugget.ID
-	committed := false
-	defer func() {
-		if !committed {
-			s.releaseAll(stored)
-		}
-	}()
-
-	v := ledger.Version{ChunkSize: nugget.Size, Headers: headers}
-	buf := make([]byte, nugget.Size)
-	for v.Size < body.size {
-		want := min(int64(len(buf)), body.size-v.Size)
-		n, rerr := io.ReadFull(body, buf[:want])
-		if rerr != nil {
-			if errors.Is(rerr, io.ErrUnexpectedEOF) || errors.Is(rerr, io.EOF) {
-				return errIncompleteBody
-			}
-			return rerr
-		}
-		data := buf[:n]
-		for _, h := range hashers {
-			h.Write(data)
-		}
-		id := nugget.Sum(data)
-		if err := s.vein.Put(id, data); err != nil {
-			return err
-		}
-		stored = append(stored, id)
-		v.Nuggets = append(v.Nuggets, ledger.NuggetRef{ID: id, Length: int64(n)})
-		v.Size += int64(n)
-	}
-	// Drain the stream terminator (and trailers) and make sure nothing extra follows.
-	if extra, rerr := io.Copy(io.Discard, io.LimitReader(body, 1)); rerr != nil {
-		return rerr
-	} else if extra > 0 {
-		return errf(http.StatusBadRequest, "IncompleteBody", "The request body is longer than the declared content length.")
-	}
-	if err := body.verify(); err != nil {
-		return err
-	}
-	md5Sum := md5h.Sum(nil)
-	if md5Want != nil && hex.EncodeToString(md5Want) != hex.EncodeToString(md5Sum) {
-		return errBadDigest
-	}
-	if sum != nil {
-		if sum.trailer {
-			sum.expected = body.trailer(sum.header())
-		}
-		if sum.expected == "" {
-			return errInvalidDigest
-		}
-		if sum.sum() != sum.expected {
-			return errBadDigest
-		}
-		v.ChecksumAlgorithm, v.ChecksumValue = sum.algorithm, sum.expected
-	}
-	v.ETag = `"` + hex.EncodeToString(md5Sum) + `"`
-
-	released, err := s.ledger.PutObject(r.Context(), req.bucket, req.key, v)
+	res, err := s.ledger.PutObject(req.r.Context(), req.bucket, req.key, v, writeCondition(req.r))
 	if err != nil {
 		return err
 	}
-	committed = true
-	s.releaseAll(released)
-	s.bytesIn.Add(float64(v.Size))
-	s.emit("object.put", map[string]any{"bucket": req.bucket, "key": req.key, "size": v.Size, "nuggets": len(v.Nuggets)})
+	s.emit("object.put", map[string]any{"bucket": req.bucket, "key": req.key, "size": v.Size, "nuggets": len(v.Nuggets), "version_id": res.VersionID})
 
 	req.w.Header().Set("ETag", v.ETag)
-	if sum != nil {
-		req.w.Header().Set(sum.header(), sum.expected)
+	setWriteVersionHeader(req.w.Header(), res.Versioning, res.VersionID)
+	if in.sum != nil {
+		req.w.Header().Set(in.sum.header(), in.sum.expected)
 	}
 	req.w.WriteHeader(http.StatusOK)
 	return nil
@@ -253,7 +181,27 @@ func checkConditions(r *http.Request, o *ledger.Object) (notModified bool, err e
 
 func (s *Server) getObject(req *request, head bool) error {
 	r := req.r
-	o, err := s.ledger.GetObject(r.Context(), req.bucket, req.key)
+	q := r.URL.Query()
+	partNumber := 0
+	if v := q.Get("partNumber"); v != "" {
+		n, err := parsePartNumber(v)
+		if err != nil {
+			return err
+		}
+		partNumber = n
+	}
+	versionID := q.Get("versionId")
+	o, err := s.ledger.GetObject(r.Context(), req.bucket, req.key, versionID)
+	h := req.w.Header()
+	if o != nil && o.IsDeleteMarker {
+		h.Set("x-amz-delete-marker", "true")
+		setVersionHeader(h, o.Versioning, o.VersionID)
+		if versionID != "" {
+			h.Set("Last-Modified", o.LastModified.UTC().Format(http.TimeFormat))
+			return errMethodNotAllowed
+		}
+		return errNoSuchKey
+	}
 	if err != nil {
 		return err
 	}
@@ -262,24 +210,46 @@ func (s *Server) getObject(req *request, head bool) error {
 		return err
 	}
 
-	h := req.w.Header()
 	h.Set("ETag", o.ETag)
 	h.Set("Last-Modified", o.LastModified.UTC().Format(http.TimeFormat))
 	h.Set("Accept-Ranges", "bytes")
+	setVersionHeader(h, o.Versioning, o.VersionID)
 	if notModified {
 		req.w.WriteHeader(http.StatusNotModified)
 		return nil
 	}
 	for k, v := range o.Headers {
-		h.Set(k, v)
+		if strings.HasPrefix(k, "x-amz-meta-") {
+			h[k] = []string{v} // S3 returns user metadata names in lower case
+		} else {
+			h.Set(k, v)
+		}
 	}
 	if h.Get("Content-Type") == "" {
 		h.Set("Content-Type", defaultCT)
 	}
+	if o.PartsCount > 0 {
+		h.Set("x-amz-mp-parts-count", strconv.Itoa(o.PartsCount))
+	}
 
 	rng := byteRange{0, o.Size - 1}
 	status := http.StatusOK
-	if v := r.Header.Get("Range"); v != "" {
+	if partNumber > 0 {
+		sizes := o.PartSizes
+		if len(sizes) == 0 {
+			sizes = []int64{o.Size} // a plain object is a single part
+		}
+		if partNumber > len(sizes) {
+			return errInvalidPart
+		}
+		var start int64
+		for _, sz := range sizes[:partNumber-1] {
+			start += sz
+		}
+		rng, status = byteRange{start, start + sizes[partNumber-1] - 1}, http.StatusPartialContent
+		h.Set("x-amz-mp-parts-count", strconv.Itoa(len(sizes)))
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, o.Size))
+	} else if v := r.Header.Get("Range"); v != "" {
 		br, ok, rerr := parseRange(v, o.Size)
 		if rerr != nil {
 			h.Set("Content-Range", fmt.Sprintf("bytes */%d", o.Size))
@@ -354,13 +324,16 @@ func (s *Server) streamNuggets(req *request, o *ledger.Object, rng byteRange, st
 }
 
 func (s *Server) deleteObject(req *request) error {
-	released, err := s.ledger.DeleteObject(req.r.Context(), req.bucket, req.key)
+	res, err := s.ledger.DeleteObject(req.r.Context(), req.bucket, req.key, req.r.URL.Query().Get("versionId"))
 	if err != nil {
 		return err
 	}
-	s.releaseAll(released)
-	if released != nil {
-		s.emit("object.deleted", map[string]any{"bucket": req.bucket, "key": req.key})
+	if res.VersionID != "" {
+		s.emit("object.deleted", map[string]any{"bucket": req.bucket, "key": req.key, "version_id": res.VersionID, "delete_marker": res.DeleteMarker})
+	}
+	setVersionHeader(req.w.Header(), res.Versioning, res.VersionID)
+	if res.DeleteMarker {
+		req.w.Header().Set("x-amz-delete-marker", "true")
 	}
 	req.w.WriteHeader(http.StatusNoContent)
 	return nil
@@ -370,7 +343,8 @@ type deleteRequest struct {
 	XMLName xml.Name `xml:"Delete"`
 	Quiet   bool     `xml:"Quiet"`
 	Objects []struct {
-		Key string `xml:"Key"`
+		Key       string `xml:"Key"`
+		VersionID string `xml:"VersionId"`
 	} `xml:"Object"`
 }
 
@@ -382,13 +356,17 @@ type deleteResult struct {
 }
 
 type deletedXML struct {
-	Key string `xml:"Key"`
+	Key                   string `xml:"Key"`
+	VersionID             string `xml:"VersionId,omitempty"`
+	DeleteMarker          bool   `xml:"DeleteMarker,omitempty"`
+	DeleteMarkerVersionID string `xml:"DeleteMarkerVersionId,omitempty"`
 }
 
 type deleteErrXML struct {
-	Key     string `xml:"Key"`
-	Code    string `xml:"Code"`
-	Message string `xml:"Message"`
+	Key       string `xml:"Key"`
+	VersionID string `xml:"VersionId,omitempty"`
+	Code      string `xml:"Code"`
+	Message   string `xml:"Message"`
 }
 
 func (s *Server) deleteObjects(req *request) error {
@@ -405,20 +383,66 @@ func (s *Server) deleteObjects(req *request) error {
 	}
 	out := deleteResult{Xmlns: s3Namespace}
 	for _, obj := range in.Objects {
-		released, err := s.ledger.DeleteObject(req.r.Context(), req.bucket, obj.Key)
+		res, err := s.ledger.DeleteObject(req.r.Context(), req.bucket, obj.Key, obj.VersionID)
 		if err != nil {
 			ae := s.toAPIError(req, err)
-			out.Errors = append(out.Errors, deleteErrXML{Key: obj.Key, Code: ae.Code, Message: ae.Message})
+			out.Errors = append(out.Errors, deleteErrXML{Key: obj.Key, VersionID: obj.VersionID, Code: ae.Code, Message: ae.Message})
 			continue
 		}
-		s.releaseAll(released)
-		if released != nil {
-			s.emit("object.deleted", map[string]any{"bucket": req.bucket, "key": obj.Key})
+		if res.VersionID != "" {
+			s.emit("object.deleted", map[string]any{"bucket": req.bucket, "key": obj.Key, "version_id": res.VersionID, "delete_marker": res.DeleteMarker})
 		}
-		if !in.Quiet {
-			out.Deleted = append(out.Deleted, deletedXML{Key: obj.Key})
+		if in.Quiet {
+			continue
 		}
+		d := deletedXML{Key: obj.Key, VersionID: obj.VersionID}
+		if res.DeleteMarker {
+			d.DeleteMarker = true
+			if obj.VersionID == "" {
+				d.DeleteMarkerVersionID = res.VersionID
+			}
+		}
+		out.Deleted = append(out.Deleted, d)
 	}
 	s.writeXML(req, http.StatusOK, out)
+	return nil
+}
+
+type versioningConfiguration struct {
+	XMLName   xml.Name `xml:"VersioningConfiguration"`
+	Xmlns     string   `xml:"xmlns,attr,omitempty"`
+	Status    string   `xml:"Status,omitempty"`
+	MFADelete string   `xml:"MfaDelete,omitempty"`
+}
+
+func (s *Server) getBucketVersioning(req *request) error {
+	b, err := s.ledger.HeadBucket(req.r.Context(), req.bucket)
+	if err != nil {
+		return err
+	}
+	s.writeXML(req, http.StatusOK, versioningConfiguration{Xmlns: s3Namespace, Status: b.Versioning})
+	return nil
+}
+
+func (s *Server) putBucketVersioning(req *request) error {
+	body, err := s.readSmallBody(req)
+	if err != nil {
+		return err
+	}
+	var in versioningConfiguration
+	if err := xml.Unmarshal(body, &in); err != nil {
+		return errMalformedXML
+	}
+	if in.Status != ledger.VersioningEnabled && in.Status != ledger.VersioningSuspended {
+		return errf(http.StatusBadRequest, "IllegalVersioningConfigurationException", "The Versioning element must be specified")
+	}
+	if in.MFADelete == "Enabled" {
+		return errNotImplemented
+	}
+	if err := s.ledger.SetVersioning(req.r.Context(), req.bucket, in.Status); err != nil {
+		return err
+	}
+	s.emit("bucket.versioning", map[string]any{"bucket": req.bucket, "status": in.Status})
+	req.w.WriteHeader(http.StatusOK)
 	return nil
 }

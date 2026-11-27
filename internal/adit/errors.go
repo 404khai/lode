@@ -44,6 +44,11 @@ var (
 	errMethodNotAllowed    = errf(http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource.")
 	errNotImplemented      = errf(http.StatusNotImplemented, "NotImplemented", "A header or operation you provided implies functionality that is not implemented.")
 	errInternal            = errf(http.StatusInternalServerError, "InternalError", "We encountered an internal error. Please try again.")
+	errNoSuchVersion       = errf(http.StatusNotFound, "NoSuchVersion", "The specified version does not exist.")
+	errNoSuchUpload        = errf(http.StatusNotFound, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed.")
+	errInvalidPart         = errf(http.StatusBadRequest, "InvalidPart", "One or more of the specified parts could not be found. The part might not have been uploaded, or the specified entity tag might not have matched the part's entity tag.")
+	errInvalidPartOrder    = errf(http.StatusBadRequest, "InvalidPartOrder", "The list of parts was not in ascending order. The parts list must be specified in order by part number.")
+	errEntityTooSmall      = errf(http.StatusBadRequest, "EntityTooSmall", "Your proposed upload is smaller than the minimum allowed object size.")
 	errInvalidContinuation = errf(http.StatusBadRequest, "InvalidArgument", "The continuation token provided is incorrect")
 )
 

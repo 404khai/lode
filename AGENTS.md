@@ -69,7 +69,7 @@ the same jobs. Tailings deletes nuggets whose refcount has been zero past a grac
 - **Strong LIST** consistency (lists are served from Ledger, not veins).
 - Manifests are immutable; a new write = a new version row.
 - A nugget is never deleted while any committed or in-flight manifest references it
-  (refcount + `pending_uploads` table + GC grace window ≥ 24h by default).
+  (Ledger refcount + touch-before-write + GC grace window ≥ 24h by default; ADR 0002).
 - Writes ack only after `W` shards are durable (fsync) — default: replication `W=2 of 3`,
   EC `k+1 of k+m`.
 
@@ -100,7 +100,8 @@ make proto            # regenerate gRPC code (buf generate)
 make up               # docker compose: postgres + 1 adit + 4 veins + foreman + lantern
 make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
 make corruption       # corrupts a nugget on the compose vein and checks it is never served
-make s3compat         # S3 compatibility suite
+make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
+make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against an Adit on :9000 (see test/s3compat/adit.yaml)
 make chaos            # kills/partitions veins while e2e runs
 ```
 
@@ -145,7 +146,7 @@ phase's exit criteria pass in CI.
 - Multipart: `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListParts`, `ListMultipartUploads`; S3-style multipart ETag.
 - Versioning: `PutBucketVersioning`, `ListObjectVersions`, `GetObject?versionId`, delete markers.
 - Tailings v1: refcount-zero sweep with grace period, plus abandoned multipart cleanup.
-- **Exit:** uploading the same 1 GiB file twice uses ~1 GiB on disk; s3-tests multipart + versioning subset passes.
+- **Exit:** uploading the same 1 GiB file twice uses ~1 GiB on disk; s3-tests multipart + versioning subset passes. ✅
 
 ### Phase 3 — Multi-node replication
 - gRPC `VeinService` (streaming PutShard/GetShard/Stat/Delete); vein registration in Ledger.
