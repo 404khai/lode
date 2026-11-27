@@ -2,6 +2,7 @@ name: ci
 on:
   push: { branches: [main] }
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   go:
@@ -23,9 +24,10 @@ jobs:
         with:
           lint: true
           format: false
-          breaking: ${{ github.event_name == 'pull_request' }}
+          breaking: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'buf skip breaking') }}
           breaking_against: ${{ github.event.repository.clone_url }}#branch=main
           push: false
+          pr_comment: false
 
   compose:
     runs-on: ubuntu-latest
