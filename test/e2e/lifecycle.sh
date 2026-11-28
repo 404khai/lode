@@ -76,4 +76,9 @@ curl -sf "$LODE_METRICS" | grep -q 'lode_strata_actions_total{action="transition
 eval "$ADIT_RESET" >/dev/null
 wait_ready
 aws s3 rm --recursive "s3://$qb" >/dev/null && aws s3 rb "s3://$qb" >/dev/null
+aws s3api delete-bucket-lifecycle --bucket "$bucket"
+for row in $(aws s3api list-object-versions --bucket "$bucket" --query '[Versions[], DeleteMarkers[]][][].[Key,VersionId]' --output text | tr '\t' '|'); do
+  aws s3api delete-object --bucket "$bucket" --key "${row%%|*}" --version-id "${row##*|}" >/dev/null
+done
+aws s3 rb "s3://$bucket" >/dev/null
 echo "lifecycle: all checks passed"

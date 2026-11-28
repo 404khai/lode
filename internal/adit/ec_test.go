@@ -240,3 +240,22 @@ func TestMisaddressedVeinIsRefused(t *testing.T) {
 		t.Fatal("v2 stored data addressed to v1")
 	}
 }
+
+// Too few veins to restore full redundancy is a wait, not a loss.
+func TestRepairWaitsForCapacityInsteadOfGivingUp(t *testing.T) {
+	h := newClusterHarness(t, 6, 3)
+	ctx := context.Background()
+	h.expect(h.do("PUT", "/wait", nil, map[string]string{"X-Lode-Storage-Class": "ec:4+2"}), 200, "")
+	h.expect(h.do("PUT", "/wait/k", randomBytes(100<<10), nil), 200, "")
+	h.veins[5].stop()
+	_, _ = h.ledger.SetVeinState(ctx, "v6", ledger.VeinDown)
+	_, _ = h.ledger.EnqueueVeinRepairs(ctx, "v6", ledger.ReasonVeinDown)
+	_ = h.cluster.Refresh(ctx)
+	s := smelter.New(smelter.Options{Ledger: h.ledger, Cluster: h.cluster, Owner: "t", MaxAttempts: 1})
+	if did, err := s.RunOne(ctx, "t"); !did || err != nil {
+		t.Fatalf("run: %v %v", did, err)
+	}
+	if st := h.stats(); st.Lost != 0 || st.Queued != 1 {
+		t.Fatalf("capacity shortage must stay queued, not lost: %+v", st)
+	}
+}

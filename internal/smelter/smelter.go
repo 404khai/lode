@@ -117,6 +117,11 @@ func (s *Smelter) RunOne(ctx context.Context, owner string) (did bool, err error
 	}
 	outcome, msg, perr := s.process(ctx, job)
 	switch {
+	case errors.Is(perr, errNotEnoughVeins):
+		// The data is readable; there are just too few healthy veins to
+		// place every copy. Keep waiting for capacity, never declare it lost.
+		outcome = "waiting"
+		err = s.opts.Ledger.RetryRepair(ctx, job.ID, owner, perr.Error(), time.Minute)
 	case perr != nil && job.Attempts >= s.opts.MaxAttempts:
 		outcome, msg = "lost", perr.Error()
 		s.log.Error("repair gave up", "nugget", job.Nugget.String(), "reason", job.Reason, "attempts", job.Attempts, "err", perr)
