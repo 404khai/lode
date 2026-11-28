@@ -27,6 +27,9 @@ cleanup() { [ -n "$reader" ] && kill "$reader" 2>/dev/null || true; eval "${VEIN
 trap cleanup EXIT
 bucket="chaos-$(date +%s)"
 aws s3 mb "s3://$bucket" >/dev/null
+# Earlier checks (e.g. corruption.sh) may have destroyed every copy of some
+# nugget on purpose; only losses during this run count.
+lost_before=$(metric lode_repair_jobs_lost)
 
 echo "chaos: loading 24 objects"
 mkdir -p "$work/src"
@@ -88,7 +91,8 @@ reads=$(wc -l <"$work/reads" | tr -d ' ')
 errors=$(wc -l <"$work/errors" | tr -d ' ')
 echo "chaos: $reads reads during the failure, $errors errors"
 if [ "$errors" -ne 0 ]; then cat "$work/errors" "$work/errors.log" >&2; echo "FAIL: client-visible errors" >&2; exit 1; fi
-[ "$(metric lode_repair_jobs_lost)" = 0 ] || { echo "FAIL: repair reports lost nuggets" >&2; exit 1; }
+lost_after=$(metric lode_repair_jobs_lost)
+[ "$lost_after" -le "$lost_before" ] || { echo "FAIL: repair lost $((lost_after - lost_before)) nuggets" >&2; exit 1; }
 
 for i in $(seq 1 24); do
   aws s3 cp "s3://$bucket/obj$i" "$work/final" >/dev/null
