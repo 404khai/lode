@@ -79,11 +79,12 @@ the same jobs. Tailings deletes nuggets whose refcount has been zero past a grac
 
 ```
 reports/           graft usage reports (graft_report_lode_<topic>.md)
-cmd/               binaries (lode, lode-adit, lode-vein, lode-foreman)
+cmd/               binaries (lode, lode-adit, lode-vein, lode-foreman, lode-lantern)
 internal/          all packages listed in §1
 proto/             gRPC definitions (buf-managed)
 migrations/        Postgres migrations (embedded; applied by internal/ledger under an advisory lock), numbered, never edited after merge
-web/lantern/       explorer UI (TypeScript, Vite, D3/react-flow)
+web/lantern/       Lantern explorer UI (TypeScript, Vite, D3), served by cmd/lode-lantern
+web/site/          marketing homepage
 deploy/            docker-compose, Dockerfiles, example configs
 test/e2e/          multi-node tests using docker compose + chaos helpers
 test/s3compat/     runs ceph/s3-tests subset against Adit
@@ -97,7 +98,7 @@ make build            # all binaries
 make test             # unit tests (go test ./... -race); set LODE_TEST_DSN=postgres://... to run Ledger/Adit integration tests
 make lint             # golangci-lint + buf lint
 make proto            # regenerate gRPC code (buf generate)
-make up               # docker compose: postgres + 1 adit + 6 veins in 2 zones + foreman (MCP, :9100); lantern joins later
+make up               # docker compose: postgres + 1 adit + 6 veins in 2 zones + foreman (MCP, :9100) + lantern (:8080)
 make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
 make corruption       # corrupts a nugget on the compose vein and checks it is never served
 make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
@@ -106,6 +107,8 @@ make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against a
 make erasure          # 4+2 bucket on 6 veins: reads with each pair of veins down
 make lifecycle        # lifecycle rules under a +40-day skewed clock, and QuotaExceeded on overrun
 make chaos            # kills a vein and corrupts another under read load; waits for full redundancy, zero client errors
+make lantern-ui       # build the Lantern UI (web/lantern/dist); `npm run dev` there proxies to a local lode-lantern
+make lantern-watch / lantern-check   # record Lantern's live stream around `make chaos` and assert it showed failure, repair flows, recovery
 ./bin/lode-foreman    # MCP server: stdio by default, -http :9100, -allow-write for write tools
 ./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs, bucket create -ec K+M, quota set|list
 ```
@@ -122,7 +125,7 @@ make chaos            # kills a vein and corrupts another under read load; waits
 8. Keep dependencies minimal. Allowed core: `pebble`, `pgx`, `grpc-go`, `blake3`, `klauspost/reedsolomon`, `mcp-go` (or official Go MCP SDK), `prometheus/client_golang`, `gopkg.in/yaml.v3`. Ask before adding others.
 9. Write an ADR in `docs/adr/` for any change to consistency, placement, or on-disk format.
 10. Don't push to `main`; open PRs from short, conventional branch names (`feat/s3-multipart`, `fix/range-reads`, `chore/ci-cache`). Never put phase names or numbers in branch names — reference the phase in the commit body instead (e.g. `Phase: 2`).
-11. **Parallel work uses graft, never git worktrees.** If a task is split across parallel agents or sessions, create and control them with graft via its MCP server. Do not use `git worktree` or worktree isolation.
+11. **Parallel work uses graft, never git worktrees.** If a task is split across parallel agents or sessions, create and control them with graft via its MCP server (registered in `.mcp.json`: `graft mcp`). Do not use `git worktree` or worktree isolation.
 12. **Every graft session ends with a report.** The agent writes `reports/graft_report_lode_<topic>.md` (e.g. `graft_report_lode_multipart.md`) covering: what it loved about graft, pain points, and improvements it would like to see. Commit the report with the work.
 
 ---
@@ -199,7 +202,7 @@ Agent-native surface. Read-only tools are default; mutating tools require `--all
 - Failed disks highlighted; repair operations animated as flows between veins with progress.
 - Event timeline (Canary state changes, repairs, GC sweeps); data fed by SSE from `internal/events`.
 - "Ask Foreman" panel: optional, calls the MCP server for natural-language questions.
-- **Exit:** during `make chaos`, Lantern shows the failure, the repair flows, and recovery to green in real time.
+- **Exit:** during `make chaos`, Lantern shows the failure, the repair flows, and recovery to green in real time. ✅
 
 ### Phase 9 — Hardening & release
 - Full s3-tests subset report published in `docs/s3-compat.md`.
