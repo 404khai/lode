@@ -46,6 +46,9 @@ type Adit struct {
 	AccessKeys  []AccessKey `yaml:"access_keys"`
 	Replication int         `yaml:"replication"`  // default replicas per nugget
 	WriteQuorum int         `yaml:"write_quorum"` // 0 = majority of replication
+	Placement   string      `yaml:"placement"`    // hrw | zone-spread | capacity-weighted
+	// Rebalance is how often to check whether the vein set changed; 0 disables.
+	Rebalance time.Duration `yaml:"rebalance"`
 }
 
 // AccessKey is a static SigV4 credential.
@@ -93,7 +96,7 @@ type Tailings struct {
 func Default() Config {
 	return Config{
 		Log:     Log{Level: "info", Format: "json"},
-		Adit:    Adit{Listen: ":9000", Region: "us-east-1", Replication: 3},
+		Adit:    Adit{Listen: ":9000", Region: "us-east-1", Replication: 3, Placement: "zone-spread", Rebalance: time.Minute},
 		Metrics: Metrics{Listen: ":9090"},
 		Vein: Vein{
 			Listen: ":7000", DataDir: "./data", Heartbeat: 2 * time.Second,
@@ -139,6 +142,7 @@ func applyEnv(cfg *Config) {
 		"LODE_VEIN_ZONE":      &cfg.Vein.Zone,
 		"LODE_VEIN_HOST":      &cfg.Vein.Host,
 		"LODE_VEIN_DATA_DIR":  &cfg.Vein.DataDir,
+		"LODE_ADIT_PLACEMENT": &cfg.Adit.Placement,
 	} {
 		if v, ok := os.LookupEnv(env); ok {
 			*dst = v
@@ -173,6 +177,7 @@ func applyEnv(cfg *Config) {
 		"LODE_VEIN_COMPACT_INTERVAL":  &cfg.Vein.CompactInterval,
 		"LODE_VEIN_SCRUB_PAUSE":       &cfg.Vein.ScrubPause,
 		"LODE_CANARY_DOWN_AFTER":      &cfg.Canary.DownAfter,
+		"LODE_ADIT_REBALANCE":         &cfg.Adit.Rebalance,
 		"LODE_CLUSTER_STALE_AFTER":    &cfg.Cluster.StaleAfter,
 	} {
 		if v, ok := os.LookupEnv(env); ok {

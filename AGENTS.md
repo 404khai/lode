@@ -97,14 +97,15 @@ make build            # all binaries
 make test             # unit tests (go test ./... -race); set LODE_TEST_DSN=postgres://... to run Ledger/Adit integration tests
 make lint             # golangci-lint + buf lint
 make proto            # regenerate gRPC code (buf generate)
-make up               # docker compose: postgres + 1 adit + 4 veins (foreman and lantern join in later phases)
+make up               # docker compose: postgres + 1 adit + 6 veins in 2 zones (foreman and lantern join in later phases)
 make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
 make corruption       # corrupts a nugget on the compose vein and checks it is never served
 make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
 make replication      # kills a vein mid-upload, then reads with each vein down (VEIN_STOP/VEIN_START with __N__ override the compose commands)
 make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against an Adit on :9000 (see test/s3compat/adit.yaml)
+make erasure          # 4+2 bucket on 6 veins: reads with each pair of veins down
 make chaos            # kills a vein and corrupts another under read load; waits for full redundancy, zero client errors
-./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs
+./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs, bucket create -ec K+M
 ```
 
 ## 5. Rules for agents
@@ -169,7 +170,7 @@ phase's exit criteria pass in CI.
 - Degraded reads (reconstruct on the fly); Smelter rebuilds lost shards from parity.
 - Placement strategies pluggable in Survey: `hrw`, `zone-spread`, `capacity-weighted`, `pinned`; rebalancer when veins join.
 - On-disk format ADR, versioned.
-- **Exit:** 6-vein cluster with 4+2 survives two simultaneous vein losses; rebalance after adding a vein moves ≤ ~1/N of data.
+- **Exit:** 6-vein cluster with 4+2 survives two simultaneous vein losses; rebalance after adding a vein moves ≤ ~1/N of data. ✅
 
 ### Phase 6 — Quotas & lifecycle
 - Claim: per-bucket and per-access-key quotas (bytes, objects), enforced at Adit before data is accepted; usage counters reconciled by background job.

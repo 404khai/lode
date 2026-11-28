@@ -148,9 +148,9 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 		}
 		progress := 0
 		for _, id := range ids {
-			ok, err := w.opts.Ledger.ReclaimNugget(ctx, id, cutoff, func(veins []string) error {
-				for _, v := range veins {
-					if err := w.opts.Veins.Delete(ctx, v, id); err != nil {
+			ok, err := w.opts.Ledger.ReclaimNugget(ctx, id, cutoff, func(locs []ledger.Location) error {
+				for _, loc := range locs {
+					if err := w.opts.Veins.Delete(ctx, loc.Vein, loc.ID); err != nil {
 						return &deferredError{err}
 					}
 				}

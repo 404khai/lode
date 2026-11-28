@@ -145,6 +145,9 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 	if !ok || st.Refs == 0 {
 		return "unreferenced", "", nil
 	}
+	if st.ECData > 0 {
+		return s.processEC(ctx, job, st)
+	}
 	want := st.Replication
 	if want <= 0 {
 		want = s.opts.DefaultReplication

@@ -31,7 +31,7 @@ func (l *Ledger) ReclaimCandidates(ctx context.Context, cutoff time.Time, limit 
 // succeeds, so a concurrent upload touching the same nugget waits, then
 // re-creates the row and rewrites the bytes. It reports whether the nugget
 // was reclaimed.
-func (l *Ledger) ReclaimNugget(ctx context.Context, id nugget.ID, cutoff time.Time, remove func(veins []string) error) (bool, error) {
+func (l *Ledger) ReclaimNugget(ctx context.Context, id nugget.ID, cutoff time.Time, remove func(locs []Location) error) (bool, error) {
 	reclaimed := false
 	err := pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
 		var refs int64
@@ -46,15 +46,24 @@ func (l *Ledger) ReclaimNugget(ctx context.Context, id nugget.ID, cutoff time.Ti
 		if refs != 0 || !touched.Before(cutoff) {
 			return nil
 		}
-		rows, err := tx.Query(ctx, "SELECT vein_id FROM nugget_replicas WHERE nugget = $1", id[:])
+		rows, err := tx.Query(ctx, `SELECT vein_id, nugget FROM nugget_replicas WHERE nugget = $1
+			UNION ALL SELECT vein_id, shard FROM nugget_shards WHERE nugget = $1`, id[:])
 		if err != nil {
 			return err
 		}
-		veins, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		locs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Location, error) {
+			var loc Location
+			var b []byte
+			if err := r.Scan(&loc.Vein, &b); err != nil {
+				return loc, err
+			}
+			loc.ID, err = nugget.FromBytes(b)
+			return loc, err
+		})
 		if err != nil {
 			return err
 		}
-		if err := remove(veins); err != nil {
+		if err := remove(locs); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, "DELETE FROM nuggets WHERE id = $1", id[:]); err != nil {

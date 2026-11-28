@@ -18,6 +18,7 @@ import (
 	"github.com/404khai/lode/internal/cluster"
 	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
+	"github.com/404khai/lode/internal/survey"
 )
 
 const s3Namespace = "http://s3.amazonaws.com/doc/2006-03-01/"
@@ -29,8 +30,9 @@ type Options struct {
 	Ledger      *ledger.Ledger
 	Cluster     *cluster.Client
 	Events      *events.Bus
-	Replication int // default replicas per nugget
-	WriteQuorum int // replicas that must be durable before a write succeeds; 0 = majority
+	Replication int    // default replicas per nugget
+	WriteQuorum int    // replicas that must be durable before a write succeeds; 0 = majority
+	Placement   string // default Survey strategy
 	Region      string
 	Credentials map[string]string // access key -> secret key
 	Now         func() time.Time
@@ -44,6 +46,7 @@ type Server struct {
 	bus         *events.Bus
 	replication int
 	quorum      int
+	placement   string
 	region      string
 	credentials map[string]string
 	now         func() time.Time
@@ -73,6 +76,7 @@ func New(opts Options) *Server {
 		bus:         opts.Events,
 		replication: opts.Replication,
 		quorum:      opts.WriteQuorum,
+		placement:   opts.Placement,
 		region:      opts.Region,
 		credentials: opts.Credentials,
 		now:         opts.Now,
@@ -364,6 +368,15 @@ func (s *Server) writeXML(req *request, status int, v any) {
 
 func (s *Server) emit(typ string, attrs map[string]any) {
 	s.bus.Publish(events.Event{Type: typ, Component: "adit", Attrs: attrs})
+}
+
+// strategy returns the bucket's placement strategy.
+func (s *Server) strategy(b ledger.Bucket) (survey.Strategy, error) {
+	name := b.Placement
+	if name == "" {
+		name = s.placement
+	}
+	return survey.ByName(name, b.Pinned)
 }
 
 // writePolicy returns the replica count and write quorum for a bucket.

@@ -37,19 +37,31 @@ type RepairJob struct {
 	Attempts int
 }
 
+// tolerance is how many more losses nugget n survives on healthy veins:
+// shards beyond k for erasure-coded nuggets, copies beyond one otherwise.
+const toleranceSQL = `(CASE WHEN n.ec_data > 0 THEN
+	(SELECT count(DISTINCT s.idx) FROM nugget_shards s JOIN veins v ON v.id = s.vein_id
+		WHERE s.nugget = n.id AND v.state = 'healthy') - n.ec_data
+	ELSE (SELECT count(*) FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
+		WHERE r.nugget = n.id AND v.state = 'healthy') - 1 END)`
+
+// wantedToleranceSQL is the tolerance nugget n should have.
+const wantedToleranceSQL = `(CASE WHEN n.ec_data > 0 THEN n.ec_parity ELSE greatest(n.replication, 1) - 1 END)`
+
 // EnqueueRepair queues a repair for id unless one is already open (badVein,
 // if set, is added to the open job's list of veins whose copy must be
 // replaced) or the nugget was already declared lost, which needs an operator.
+// id may be a shard ID; it is resolved to its nugget.
 func (l *Ledger) EnqueueRepair(ctx context.Context, id nugget.ID, reason, badVein string) error {
 	bad := []string{}
 	if badVein != "" {
 		bad = append(bad, badVein)
 	}
 	_, err := l.pool.Exec(ctx, `
+		WITH t AS (SELECT coalesce((SELECT nugget FROM nugget_shards WHERE shard = $1 LIMIT 1), $1::bytea) AS id)
 		INSERT INTO repair_jobs (nugget, reason, bad_veins, priority)
-		SELECT $1, $2, $3, (SELECT count(*) FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
-			WHERE r.nugget = $1 AND v.state = 'healthy')
-		WHERE NOT EXISTS (SELECT 1 FROM repair_jobs WHERE nugget = $1 AND state = 'lost')
+		SELECT t.id, $2, $3, coalesce((SELECT `+toleranceSQL+` FROM nuggets n WHERE n.id = t.id), 0) FROM t
+		WHERE NOT EXISTS (SELECT 1 FROM repair_jobs WHERE nugget = t.id AND state = 'lost')
 		ON CONFLICT (nugget) WHERE state IN ('queued', 'leased') DO UPDATE
 			SET bad_veins = (SELECT array_agg(DISTINCT b) FROM unnest(repair_jobs.bad_veins || EXCLUDED.bad_veins) b),
 			    updated_at = now()`, id[:], reason, bad)
@@ -57,30 +69,29 @@ func (l *Ledger) EnqueueRepair(ctx context.Context, id nugget.ID, reason, badVei
 }
 
 // EnqueueVeinRepairs queues repairs for every referenced nugget with a copy
-// on vein. It returns how many jobs were added.
+// or shard on vein. It returns how many jobs were added.
 func (l *Ledger) EnqueueVeinRepairs(ctx context.Context, vein, reason string) (int64, error) {
 	tag, err := l.pool.Exec(ctx, `
 		INSERT INTO repair_jobs (nugget, reason, priority)
-		SELECT r.nugget, $2, (SELECT count(*) FROM nugget_replicas r2 JOIN veins v ON v.id = r2.vein_id
-			WHERE r2.nugget = r.nugget AND v.state = 'healthy')
-		FROM nugget_replicas r JOIN nuggets n ON n.id = r.nugget
-		WHERE r.vein_id = $1 AND n.refs > 0
+		SELECT n.id, $2, `+toleranceSQL+`
+		FROM nuggets n
+		WHERE n.refs > 0 AND n.id IN (SELECT nugget FROM nugget_replicas WHERE vein_id = $1
+			UNION SELECT nugget FROM nugget_shards WHERE vein_id = $1)
 		ON CONFLICT (nugget) WHERE state IN ('queued', 'leased') DO NOTHING`, vein, reason)
 	return tag.RowsAffected(), err
 }
 
-// EnqueueUnderReplicated queues repairs for referenced nuggets with fewer
-// copies on healthy veins than they want. It is the safety net that catches
-// anything the event-driven paths missed.
+// EnqueueUnderReplicated queues repairs for referenced nuggets with less
+// fault tolerance on healthy veins than they want. It is the safety net that
+// catches anything the event-driven paths missed.
 func (l *Ledger) EnqueueUnderReplicated(ctx context.Context, limit int) (int64, error) {
 	tag, err := l.pool.Exec(ctx, `
 		INSERT INTO repair_jobs (nugget, reason, priority)
-		SELECT n.id, 'under_replicated', h.cnt
-		FROM nuggets n
-		CROSS JOIN LATERAL (SELECT count(*) AS cnt FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
-			WHERE r.nugget = n.id AND v.state = 'healthy') h
-		WHERE n.refs > 0 AND h.cnt < greatest(n.replication, 1)
-		  AND NOT EXISTS (SELECT 1 FROM repair_jobs j WHERE j.nugget = n.id AND j.state IN ('queued', 'leased', 'lost'))
+		SELECT id, 'under_replicated', tol FROM (
+			SELECT n.id, `+toleranceSQL+` AS tol, `+wantedToleranceSQL+` AS want
+			FROM nuggets n WHERE n.refs > 0
+			  AND NOT EXISTS (SELECT 1 FROM repair_jobs j WHERE j.nugget = n.id AND j.state IN ('queued', 'leased', 'lost'))
+		) x WHERE tol < want
 		LIMIT $1
 		ON CONFLICT (nugget) WHERE state IN ('queued', 'leased') DO NOTHING`, limit)
 	return tag.RowsAffected(), err
@@ -128,7 +139,7 @@ func (l *Ledger) RetryRepair(ctx context.Context, id int64, owner, msg string, b
 // RepairStats summarises the repair queue and redundancy.
 type RepairStats struct {
 	Queued, Leased, Lost int64
-	UnderReplicated      int64 // referenced nuggets below their wanted copies on healthy veins
+	UnderReplicated      int64 // referenced nuggets with less fault tolerance on healthy veins than wanted
 }
 
 func (l *Ledger) RepairStats(ctx context.Context) (RepairStats, error) {
@@ -140,27 +151,34 @@ func (l *Ledger) RepairStats(ctx context.Context) (RepairStats, error) {
 		return s, err
 	}
 	err = l.pool.QueryRow(ctx, `SELECT count(*) FROM nuggets n
-		WHERE n.refs > 0 AND (SELECT count(*) FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
-			WHERE r.nugget = n.id AND v.state = 'healthy') < greatest(n.replication, 1)`).Scan(&s.UnderReplicated)
+		WHERE n.refs > 0 AND `+toleranceSQL+` < `+wantedToleranceSQL).Scan(&s.UnderReplicated)
 	return s, err
 }
 
 // NuggetState is what Smelter needs to repair a nugget.
 type NuggetState struct {
-	Length      int64
-	Refs        int64
-	Replication int
-	Replicas    []string
+	Length           int64
+	Refs             int64
+	Replication      int
+	Replicas         []string
+	ECData, ECParity int
+	Shards           []ShardLoc
 }
 
 // Nugget returns a nugget's state; ok is false if the Ledger has no record.
 func (l *Ledger) Nugget(ctx context.Context, id nugget.ID) (st NuggetState, ok bool, err error) {
-	err = l.pool.QueryRow(ctx, `SELECT n.length, n.refs, n.replication,
-		coalesce((SELECT array_agg(vein_id ORDER BY vein_id) FROM nugget_replicas WHERE nugget = n.id), '{}')
-		FROM nuggets n WHERE n.id = $1`, id[:]).Scan(&st.Length, &st.Refs, &st.Replication, &st.Replicas)
+	err = l.pool.QueryRow(ctx, `SELECT n.length, n.refs, n.replication, n.ec_data, n.ec_parity
+		FROM nuggets n WHERE n.id = $1`, id[:]).Scan(&st.Length, &st.Refs, &st.Replication, &st.ECData, &st.ECParity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return st, false, nil
 	}
+	if err != nil {
+		return st, false, err
+	}
+	if st.Replicas, err = replicasOf(ctx, l.pool, id); err != nil {
+		return st, false, err
+	}
+	st.Shards, err = shardsOf(ctx, l.pool, id)
 	return st, err == nil, err
 }
 
@@ -188,8 +206,9 @@ var ErrNoSuchVein = errors.New("ledger: no such vein")
 // records on vein.
 func (l *Ledger) VeinReplicaCount(ctx context.Context, vein string) (int64, error) {
 	var n int64
-	err := l.pool.QueryRow(ctx, `SELECT count(*) FROM nugget_replicas r JOIN nuggets n ON n.id = r.nugget
-		WHERE r.vein_id = $1 AND n.refs > 0`, vein).Scan(&n)
+	err := l.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM nugget_replicas r JOIN nuggets n ON n.id = r.nugget WHERE r.vein_id = $1 AND n.refs > 0) +
+		(SELECT count(*) FROM nugget_shards s JOIN nuggets n ON n.id = s.nugget WHERE s.vein_id = $1 AND n.refs > 0)`, vein).Scan(&n)
 	return n, err
 }
 
@@ -211,10 +230,15 @@ func (l *Ledger) RemoveVein(ctx context.Context, id string, force bool) error {
 		}
 		if !force {
 			var orphans int64
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM nugget_replicas r JOIN nuggets n ON n.id = r.nugget
-				WHERE r.vein_id = $1 AND n.refs > 0 AND NOT EXISTS (
-					SELECT 1 FROM nugget_replicas o JOIN veins v ON v.id = o.vein_id
-					WHERE o.nugget = r.nugget AND o.vein_id <> $1 AND v.state <> 'removed')`, id).Scan(&orphans); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM nugget_replicas r JOIN nuggets n ON n.id = r.nugget
+					WHERE r.vein_id = $1 AND n.refs > 0 AND NOT EXISTS (
+						SELECT 1 FROM nugget_replicas o JOIN veins v ON v.id = o.vein_id
+						WHERE o.nugget = r.nugget AND o.vein_id <> $1 AND v.state <> 'removed')) +
+				(SELECT count(*) FROM nuggets n WHERE n.refs > 0 AND n.ec_data > 0
+					AND n.id IN (SELECT nugget FROM nugget_shards WHERE vein_id = $1)
+					AND (SELECT count(DISTINCT s.idx) FROM nugget_shards s JOIN veins v ON v.id = s.vein_id
+						WHERE s.nugget = n.id AND s.vein_id <> $1 AND v.state <> 'removed') < n.ec_data)`, id).Scan(&orphans); err != nil {
 				return err
 			}
 			if orphans > 0 {
@@ -224,7 +248,47 @@ func (l *Ledger) RemoveVein(ctx context.Context, id string, force bool) error {
 		if _, err := tx.Exec(ctx, "DELETE FROM nugget_replicas WHERE vein_id = $1", id); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, "DELETE FROM nugget_shards WHERE vein_id = $1", id); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, "UPDATE veins SET state = 'removed', state_changed = now() WHERE id = $1", id)
 		return err
 	})
+}
+
+// NuggetEntry is a referenced nugget with its storage state.
+type NuggetEntry struct {
+	ID nugget.ID
+	NuggetState
+}
+
+// ListNuggets pages through referenced nuggets in ID order after `after`.
+func (l *Ledger) ListNuggets(ctx context.Context, after nugget.ID, limit int) ([]NuggetEntry, error) {
+	rows, err := l.pool.Query(ctx, `
+		SELECT n.id, n.length, n.refs, n.replication, n.ec_data, n.ec_parity,
+			coalesce((SELECT array_agg(vein_id ORDER BY vein_id) FROM nugget_replicas WHERE nugget = n.id), '{}')
+		FROM nuggets n WHERE n.refs > 0 AND n.id > $1 ORDER BY n.id LIMIT $2`, after[:], limit)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (NuggetEntry, error) {
+		var e NuggetEntry
+		var b []byte
+		if err := r.Scan(&b, &e.Length, &e.Refs, &e.Replication, &e.ECData, &e.ECParity, &e.Replicas); err != nil {
+			return e, err
+		}
+		e.ID, err = nugget.FromBytes(b)
+		return e, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if out[i].ECData > 0 {
+			if out[i].Shards, err = shardsOf(ctx, l.pool, out[i].ID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
 }

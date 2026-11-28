@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	lodev1 "github.com/404khai/lode/gen/lode/v1"
@@ -26,6 +27,7 @@ import (
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/nugget"
 	"github.com/404khai/lode/internal/survey"
+	"github.com/404khai/lode/internal/vein"
 )
 
 var (
@@ -167,15 +169,7 @@ func (c *Client) Refresh(ctx context.Context) error {
 		if m != nil {
 			_ = m.conn.Close()
 		}
-		dial := append([]grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			// Reconnect quickly after a vein restarts.
-			grpc.WithConnectParams(grpc.ConnectParams{
-				Backoff:           backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: time.Second},
-				MinConnectTimeout: 2 * time.Second,
-			}),
-		}, c.opts.DialOptions...)
-		conn, err := grpc.NewClient(v.Addr, dial...)
+		conn, err := c.dial(v)
 		if err != nil {
 			c.log.Warn("dial vein", "vein", v.ID, "addr", v.Addr, "err", err)
 			continue
@@ -193,6 +187,49 @@ func (c *Client) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// dial connects to a vein, stamping every call with the vein's identity so a
+// connection that has drifted to another node is refused, not trusted.
+func (c *Client) dial(v ledger.VeinInfo) (*grpc.ClientConn, error) {
+	stamp := func(ctx context.Context) context.Context {
+		return metadata.AppendToOutgoingContext(ctx, vein.IdentityHeader, v.ID)
+	}
+	dial := append([]grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
+			invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(stamp(ctx), method, req, reply, cc, opts...)
+		}),
+		grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
+			streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			return streamer(stamp(ctx), desc, cc, method, opts...)
+		}),
+		// Reconnect quickly after a vein restarts.
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: time.Second},
+			MinConnectTimeout: 2 * time.Second,
+		}),
+	}, c.opts.DialOptions...)
+	return grpc.NewClient(v.Addr, dial...)
+}
+
+// redial replaces a vein's connection, forcing a fresh address lookup.
+func (c *Client) redial(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.members[id]
+	if m == nil {
+		return
+	}
+	conn, err := c.dial(m.info)
+	if err != nil {
+		c.log.Warn("redial vein", "vein", id, "err", err)
+		return
+	}
+	_ = m.conn.Close()
+	m.conn, m.client = conn, lodev1.NewVeinServiceClient(conn)
+	c.log.Warn("connection reached the wrong vein; redialled", "vein", id)
+}
+
 func (c *Client) usable(m *member, now time.Time) bool {
 	return m.info.State == "healthy" && now.Sub(m.info.LastHeartbeat) < c.opts.StaleAfter && now.After(m.downUntil)
 }
@@ -202,7 +239,8 @@ func (c *Client) availableLocked() []survey.Node {
 	var nodes []survey.Node
 	for _, m := range c.members {
 		if c.usable(m, now) {
-			nodes = append(nodes, survey.Node{ID: m.info.ID, Zone: m.info.Zone, Host: m.info.Host})
+			nodes = append(nodes, survey.Node{ID: m.info.ID, Zone: m.info.Zone, Host: m.info.Host,
+				Capacity: m.info.CapacityBytes, Used: m.info.UsedBytes})
 		}
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
@@ -256,6 +294,9 @@ func (c *Client) observe(ctx context.Context, veinID, method string, start time.
 	c.rpcLatency.WithLabelValues(method).Observe(time.Since(start).Seconds())
 	if err == nil || !transportFailure(err) || ctx.Err() != nil {
 		return
+	}
+	if vein.IsWrongVein(err) {
+		go c.redial(veinID)
 	}
 	c.mu.Lock()
 	m := c.members[veinID]
@@ -382,7 +423,7 @@ func (c *Client) Delete(ctx context.Context, veinID string, id nugget.ID) (err e
 // veins that already hold it. It succeeds once at least `quorum` copies are
 // durable and returns the veins newly written. Fewer than `replicas` copies
 // is a degraded write that repair (Smelter) will top up.
-func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing []string, replicas, quorum int) ([]string, error) {
+func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing []string, replicas, quorum int, placer survey.Strategy) ([]string, error) {
 	avail := c.Available()
 	isAvail := map[string]bool{}
 	for _, n := range avail {
@@ -401,7 +442,7 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 		return nil, nil
 	}
 	var targets []string
-	for _, n := range survey.Place(id, len(avail), avail) {
+	for _, n := range placer.Place(id, len(avail), avail) {
 		if len(targets) == replicas-held {
 			break
 		}
@@ -446,11 +487,20 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 	return written, nil
 }
 
-// Read returns ref's bytes from the best replica: available veins first,
+// Read returns ref's bytes: from the best replica, or for an erasure-coded
+// nugget by reading (and if needed reconstructing from) its shards.
+func (c *Client) Read(ctx context.Context, ref ledger.NuggetRef) ([]byte, error) {
+	if ref.ECData > 0 {
+		return c.readEC(ctx, ref)
+	}
+	return c.readReplicated(ctx, ref)
+}
+
+// readReplicated returns ref's bytes from the best replica: available veins first,
 // lowest read latency first, falling back through every replica. If every
 // replica was unreachable, it tries once more waiting briefly for
 // reconnecting veins (one may just have restarted).
-func (c *Client) Read(ctx context.Context, ref ledger.NuggetRef) ([]byte, error) {
+func (c *Client) readReplicated(ctx context.Context, ref ledger.NuggetRef) ([]byte, error) {
 	order := c.readOrder(ref.Replicas)
 	var errs []error
 	corrupt, attempts := 0, 0

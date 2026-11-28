@@ -28,7 +28,8 @@ services:
       retries: 30
     volumes: [pgdata:/var/lib/postgresql/data]
 
-  # Four veins in two zones; replication 3 puts copies in both zones.
+  # Six veins in two zones: replication 3 puts copies in both zones, and
+  # erasure-coded buckets (e.g. 4+2) get one shard per vein.
   vein1:
     <<: *vein
     environment: { <<: *vein-env, LODE_VEIN_ID: vein1, LODE_VEIN_ADVERTISE: "vein1:7000", LODE_VEIN_ZONE: a, LODE_VEIN_HOST: vein1 }
@@ -45,6 +46,14 @@ services:
     <<: *vein
     environment: { <<: *vein-env, LODE_VEIN_ID: vein4, LODE_VEIN_ADVERTISE: "vein4:7000", LODE_VEIN_ZONE: b, LODE_VEIN_HOST: vein4 }
     volumes: [vein4:/data]
+  vein5:
+    <<: *vein
+    environment: { <<: *vein-env, LODE_VEIN_ID: vein5, LODE_VEIN_ADVERTISE: "vein5:7000", LODE_VEIN_ZONE: a, LODE_VEIN_HOST: vein5 }
+    volumes: [vein5:/data]
+  vein6:
+    <<: *vein
+    environment: { <<: *vein-env, LODE_VEIN_ID: vein6, LODE_VEIN_ADVERTISE: "vein6:7000", LODE_VEIN_ZONE: b, LODE_VEIN_HOST: vein6 }
+    volumes: [vein6:/data]
 
   adit:
     build:
@@ -65,3 +74,5 @@ volumes:
   vein2:
   vein3:
   vein4:
+  vein5:
+  vein6:
