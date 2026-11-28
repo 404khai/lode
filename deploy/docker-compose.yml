@@ -9,6 +9,8 @@ x-vein: &vein
     LODE_VEIN_LISTEN: ":7000"
     LODE_VEIN_DATA_DIR: /data
     LODE_LOG_FORMAT: text
+    LODE_VEIN_SCRUB_PAUSE: 10s  # aggressive scrubbing for the dev cluster
+    LODE_VEIN_SCRUB_RATE: "0"
   depends_on:
     postgres: { condition: service_healthy }
 
@@ -51,6 +53,8 @@ services:
     command: ["-config", "/etc/lode/adit.yaml"]
     volumes:
       - ./adit.example.yaml:/etc/lode/adit.yaml:ro
+    environment:
+      LODE_CANARY_DOWN_AFTER: 15s
     ports: ["9000:9000", "9090:9090"]
     depends_on:
       postgres: { condition: service_healthy }

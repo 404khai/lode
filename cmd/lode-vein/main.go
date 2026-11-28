@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 
 	lodev1 "github.com/404khai/lode/gen/lode/v1"
+	"github.com/404khai/lode/internal/assay"
 	"github.com/404khai/lode/internal/config"
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/logging"
@@ -115,7 +116,9 @@ func run() error {
 	}
 	info := func() ledger.VeinInfo {
 		capacity, used, _ := store.Usage()
-		return ledger.VeinInfo{ID: id, Addr: advertise, Zone: cfg.Vein.Zone, Host: cfg.Vein.Host, CapacityBytes: capacity, UsedBytes: used}
+		ioErrs, corrupt := store.Health()
+		return ledger.VeinInfo{ID: id, Addr: advertise, Zone: cfg.Vein.Zone, Host: cfg.Vein.Host,
+			CapacityBytes: capacity, UsedBytes: used, IOErrors: ioErrs, CorruptNuggets: corrupt}
 	}
 	if err := led.RegisterVein(ctx, info()); err != nil {
 		return fmt.Errorf("register vein: %w", err)
@@ -144,6 +147,13 @@ func run() error {
 
 	go heartbeat(ctx, led, cfg.Vein.Heartbeat, info, log)
 	go compactLoop(ctx, store, cfg.Vein.CompactInterval, cfg.Vein.CompactRatio, log)
+	if cfg.Vein.ScrubPause >= 0 {
+		scrub := assay.New(assay.Options{
+			Store: store, Ledger: led, VeinID: id, Logger: log.With("component", "assay"), Registerer: reg,
+			BytesPerSecond: cfg.Vein.ScrubRate, Pause: cfg.Vein.ScrubPause,
+		})
+		go scrub.Run(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -182,8 +192,7 @@ func heartbeat(ctx context.Context, led *ledger.Ledger, every time.Duration, inf
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			v := info()
-			if err := led.Heartbeat(ctx, v.ID, v.CapacityBytes, v.UsedBytes); err != nil && ctx.Err() == nil {
+			if err := led.Heartbeat(ctx, info()); err != nil && ctx.Err() == nil {
 				log.Warn("heartbeat", "err", err)
 			}
 		}

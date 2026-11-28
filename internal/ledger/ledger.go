@@ -241,12 +241,13 @@ func lockBucket(ctx context.Context, tx pgx.Tx, name string) (id int64, versioni
 // TouchNugget records that an upload is about to write ref, so Tailings will
 // not reclaim it during the grace window, and returns the veins that already
 // hold it. Callers must touch a nugget before writing it to any vein.
-func (l *Ledger) TouchNugget(ctx context.Context, ref NuggetRef) ([]string, error) {
+func (l *Ledger) TouchNugget(ctx context.Context, ref NuggetRef, replication int) ([]string, error) {
 	var replicas []string
 	err := pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO nuggets (id, length, refs, last_touched) VALUES ($1, $2, 0, now())
-			ON CONFLICT (id) DO UPDATE SET last_touched = now()`, ref.ID[:], ref.Length); err != nil {
+			INSERT INTO nuggets (id, length, refs, last_touched, replication) VALUES ($1, $2, 0, now(), $3)
+			ON CONFLICT (id) DO UPDATE SET last_touched = now(), replication = greatest(nuggets.replication, EXCLUDED.replication)`,
+			ref.ID[:], ref.Length, replication); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, "SELECT vein_id FROM nugget_replicas WHERE nugget = $1 ORDER BY vein_id", ref.ID[:])

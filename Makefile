@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -s -w -X github.com/404khai/lode/internal/version.Version=$(VERSION) -X github.com/404khai/lode/internal/version.Commit=$(COMMIT)
-BINS    := lode-adit lode-vein
+BINS    := lode lode-adit lode-vein
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
 .PHONY: build test lint proto up down e2e corruption dedup replication s3compat chaos
@@ -42,4 +42,4 @@ s3compat:
 	test/s3compat/run.sh
 
 chaos:
-	@echo "make $@: not available until a later phase (see AGENTS.md §6)"; exit 1
+	test/e2e/chaos.sh

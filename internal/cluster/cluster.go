@@ -58,6 +58,12 @@ type Options struct {
 	RPCTimeout  time.Duration
 	DialOptions []grpc.DialOption
 	Now         func() time.Time
+
+	// OnUnderReplicated is called after a degraded write (quorum but fewer
+	// than the wanted copies); OnCorrupt when a read finds a corrupt copy.
+	// Adit uses them to queue repairs.
+	OnUnderReplicated func(ctx context.Context, id nugget.ID)
+	OnCorrupt         func(ctx context.Context, id nugget.ID, vein string)
 }
 
 type member struct {
@@ -431,6 +437,9 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 		c.writes.WithLabelValues("degraded").Inc()
 		c.opts.Events.Publish(events.Event{Type: "nugget.under_replicated", Component: "adit",
 			Attrs: map[string]any{"nugget": id.String(), "replicas": total, "want": replicas}})
+		if c.opts.OnUnderReplicated != nil {
+			c.opts.OnUnderReplicated(ctx, id)
+		}
 	default:
 		c.writes.WithLabelValues("full").Inc()
 	}
@@ -461,6 +470,9 @@ func (c *Client) Read(ctx context.Context, ref ledger.NuggetRef) ([]byte, error)
 				corrupt++
 				c.opts.Events.Publish(events.Event{Type: "nugget.corrupt", Component: "adit",
 					Attrs: map[string]any{"nugget": ref.ID.String(), "vein": v}})
+				if c.opts.OnCorrupt != nil {
+					c.opts.OnCorrupt(ctx, ref.ID, v)
+				}
 			case transportFailure(err):
 				unreachable++
 			}

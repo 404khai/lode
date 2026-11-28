@@ -57,6 +57,8 @@ jobs:
         run: DEDUP_SIZE_MB=1024 make dedup
       - name: Vein killed mid-upload; reads with any one vein down
         run: make replication
+      - name: Chaos — kill a vein, corrupt another, heal with zero client errors
+        run: make chaos
       - name: Metrics exported
         run: curl -sf localhost:9090/metrics | grep -E 'lode_adit_requests_total|lode_cluster_veins_available'
       - if: failure()

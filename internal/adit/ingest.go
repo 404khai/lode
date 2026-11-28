@@ -86,7 +86,7 @@ func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ing
 			h.Write(data)
 		}
 		ref := ledger.NuggetRef{ID: nugget.Sum(data), Length: int64(len(data))}
-		existing, err := s.ledger.TouchNugget(r.Context(), ref)
+		existing, err := s.ledger.TouchNugget(r.Context(), ref, replicas)
 		if err != nil {
 			return nil, err
 		}

@@ -14,6 +14,7 @@
 package vein
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,6 +109,20 @@ type Store struct {
 
 	puts, dedups, gets, corrupt, deletes prometheus.Counter
 	bytesWritten, bytesReclaimed         prometheus.Counter
+	ioErrors                             prometheus.Counter
+
+	ioErrorCount, corruptCount atomic.Int64
+}
+
+// Health reports cumulative I/O errors and corrupt nuggets seen by this store.
+func (s *Store) Health() (ioErrors, corrupt int64) {
+	return s.ioErrorCount.Load(), s.corruptCount.Load()
+}
+
+func (s *Store) ioError(err error) error {
+	s.ioErrors.Inc()
+	s.ioErrorCount.Add(1)
+	return err
 }
 
 // Open opens or creates a store in opts.Dir.
@@ -145,6 +162,7 @@ func Open(opts Options) (*Store, error) {
 		deletes:        counter("nugget_deletes_total", "Nuggets removed from the index."),
 		bytesWritten:   counter("bytes_written_total", "Nugget bytes appended to segments."),
 		bytesReclaimed: counter("bytes_reclaimed_total", "Segment bytes freed by compaction."),
+		ioErrors:       counter("io_errors_total", "Disk read/write/fsync errors."),
 	}
 	if err := s.openActive(); err != nil {
 		_ = db.Close()
@@ -253,10 +271,10 @@ func (s *Store) appendLocked(data []byte) (entry, error) {
 	}
 	off := s.size
 	if _, err := s.active.Write(data); err != nil {
-		return entry{}, fmt.Errorf("vein: append: %w", err)
+		return entry{}, s.ioError(fmt.Errorf("vein: append: %w", err))
 	}
 	if err := s.active.Sync(); err != nil {
-		return entry{}, fmt.Errorf("vein: fsync: %w", err)
+		return entry{}, s.ioError(fmt.Errorf("vein: fsync: %w", err))
 	}
 	s.size += int64(len(data))
 	s.bytesWritten.Add(float64(len(data)))
@@ -317,13 +335,14 @@ func (s *Store) read(id nugget.ID) ([]byte, error) {
 		if errors.Is(err, io.EOF) {
 			return nil, s.markCorrupt(id, "short read")
 		}
-		return nil, fmt.Errorf("vein: read: %w", err)
+		return nil, s.ioError(fmt.Errorf("vein: read: %w", err))
 	}
 	return buf, nil
 }
 
 func (s *Store) markCorrupt(id nugget.ID, reason string) error {
 	s.corrupt.Inc()
+	s.corruptCount.Add(1)
 	s.log.Error("nugget corrupt", "nugget", id.String(), "reason", reason)
 	s.bus.Publish(events.Event{Type: "nugget.corrupt", Component: "vein", Attrs: map[string]any{"nugget": id.String(), "reason": reason}})
 	return fmt.Errorf("%w: %s (%s)", ErrCorrupt, id, reason)
@@ -482,6 +501,51 @@ func (s *Store) Close() error {
 		errs = append(errs, s.active.Close())
 	}
 	return errors.Join(errs...)
+}
+
+// Scrub reads and verifies every stored nugget, calling corrupt for each one
+// that fails verification. limit, if set, paces the scan to that many bytes
+// per second. It stops early when ctx is done.
+func (s *Store) Scrub(ctx context.Context, limit int64, corrupt func(nugget.ID)) (scanned int64, err error) {
+	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte(keyPrefix), UpperBound: []byte("n0")})
+	if err != nil {
+		return 0, err
+	}
+	var ids []nugget.ID
+	for it.First(); it.Valid(); it.Next() {
+		if id, ierr := nugget.FromBytes(it.Key()[len(keyPrefix):]); ierr == nil {
+			ids = append(ids, id)
+		}
+	}
+	if err := it.Close(); err != nil {
+		return 0, err
+	}
+	start := time.Now()
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return scanned, ctx.Err()
+		}
+		data, err := s.Get(id)
+		switch {
+		case errors.Is(err, ErrCorrupt):
+			corrupt(id)
+		case errors.Is(err, ErrNotFound):
+			continue // deleted since the scan started
+		case err != nil:
+			return scanned, err
+		}
+		scanned += int64(len(data))
+		if limit > 0 {
+			if ahead := time.Duration(float64(scanned)/float64(limit)*float64(time.Second)) - time.Since(start); ahead > 0 {
+				select {
+				case <-ctx.Done():
+					return scanned, ctx.Err()
+				case <-time.After(ahead):
+				}
+			}
+		}
+	}
+	return scanned, nil
 }
 
 // pebbleLogger routes Pebble's logging through slog.

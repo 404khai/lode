@@ -103,7 +103,8 @@ make corruption       # corrupts a nugget on the compose vein and checks it is n
 make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
 make replication      # kills a vein mid-upload, then reads with each vein down (VEIN_STOP/VEIN_START with __N__ override the compose commands)
 make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against an Adit on :9000 (see test/s3compat/adit.yaml)
-make chaos            # kills/partitions veins while e2e runs
+make chaos            # kills a vein and corrupts another under read load; waits for full redundancy, zero client errors
+./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs
 ```
 
 ## 5. Rules for agents
@@ -161,7 +162,7 @@ phase's exit criteria pass in CI.
 - Smelter: re-replicates under-replicated nuggets; throttled bandwidth.
 - Assay: continuous scrub at configurable rate; enqueues repair on hash mismatch.
 - Draining a vein for decommission.
-- **Exit:** `make chaos` — kill a vein, corrupt random files on another — cluster returns to full redundancy with zero client-visible errors and zero lost objects.
+- **Exit:** `make chaos` — kill a vein, corrupt random files on another — cluster returns to full redundancy with zero client-visible errors and zero lost objects. ✅
 
 ### Phase 5 — Erasure coding & placement strategies
 - Reed–Solomon (`k+m`, e.g. 4+2, 8+3) per bucket/storage class; EC applied at nugget-stripe level.

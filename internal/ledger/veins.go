@@ -11,14 +11,17 @@ import (
 
 // VeinInfo is a registered storage node.
 type VeinInfo struct {
-	ID            string
-	Addr          string
-	Zone          string
-	Host          string
-	State         string
-	CapacityBytes int64
-	UsedBytes     int64
-	LastHeartbeat time.Time
+	ID             string
+	Addr           string
+	Zone           string
+	Host           string
+	State          string
+	CapacityBytes  int64
+	UsedBytes      int64
+	LastHeartbeat  time.Time
+	IOErrors       int64
+	CorruptNuggets int64
+	StateChanged   time.Time
 }
 
 // RegisterVein records a vein, or updates its address and labels.
@@ -27,29 +30,31 @@ func (l *Ledger) RegisterVein(ctx context.Context, v VeinInfo) error {
 		INSERT INTO veins (id, addr, zone, host, capacity_bytes, used_bytes, last_heartbeat)
 		VALUES ($1, $2, $3, $4, $5, $6, now())
 		ON CONFLICT (id) DO UPDATE SET addr = EXCLUDED.addr, zone = EXCLUDED.zone, host = EXCLUDED.host,
-			capacity_bytes = EXCLUDED.capacity_bytes, used_bytes = EXCLUDED.used_bytes, last_heartbeat = now(),
-			state = CASE WHEN veins.state IN ('down', 'suspect') THEN 'healthy' ELSE veins.state END`,
+			capacity_bytes = EXCLUDED.capacity_bytes, used_bytes = EXCLUDED.used_bytes, last_heartbeat = now()`,
 		v.ID, v.Addr, v.Zone, v.Host, v.CapacityBytes, v.UsedBytes)
 	return err
 }
 
-// Heartbeat refreshes a vein's liveness and usage.
-func (l *Ledger) Heartbeat(ctx context.Context, id string, capacity, used int64) error {
+// Heartbeat refreshes a vein's liveness, usage and disk health. Canary
+// decides state; a heartbeat never changes it.
+func (l *Ledger) Heartbeat(ctx context.Context, h VeinInfo) error {
 	_, err := l.pool.Exec(ctx, `UPDATE veins SET last_heartbeat = now(), capacity_bytes = $2, used_bytes = $3,
-		state = CASE WHEN state IN ('down', 'suspect') THEN 'healthy' ELSE state END WHERE id = $1`, id, capacity, used)
+		io_errors = $4, corrupt_nuggets = $5 WHERE id = $1`, h.ID, h.CapacityBytes, h.UsedBytes, h.IOErrors, h.CorruptNuggets)
 	return err
 }
 
 // ListVeins returns every vein that has not been removed.
 func (l *Ledger) ListVeins(ctx context.Context) ([]VeinInfo, error) {
-	rows, err := l.pool.Query(ctx, `SELECT id, addr, zone, host, state, capacity_bytes, used_bytes, last_heartbeat
+	rows, err := l.pool.Query(ctx, `SELECT id, addr, zone, host, state, capacity_bytes, used_bytes, last_heartbeat,
+		io_errors, corrupt_nuggets, state_changed
 		FROM veins WHERE state <> 'removed' ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (VeinInfo, error) {
 		var v VeinInfo
-		return v, r.Scan(&v.ID, &v.Addr, &v.Zone, &v.Host, &v.State, &v.CapacityBytes, &v.UsedBytes, &v.LastHeartbeat)
+		return v, r.Scan(&v.ID, &v.Addr, &v.Zone, &v.Host, &v.State, &v.CapacityBytes, &v.UsedBytes, &v.LastHeartbeat,
+			&v.IOErrors, &v.CorruptNuggets, &v.StateChanged)
 	})
 }
 

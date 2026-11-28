@@ -3,7 +3,7 @@
 Self-hostable, S3-compatible distributed object store in Go, with an MCP server (Foreman)
 for agents and a visual cluster explorer (Lantern).
 
-Status: **replicated object store: 3 copies across zones by default, with multipart, versioning, dedup and GC.** See [AGENTS.md](AGENTS.md) for architecture and roadmap.
+Status: **self-healing replicated object store: 3 copies across zones, failure detection, automatic repair and scrubbing, with multipart, versioning, dedup and GC.** See [AGENTS.md](AGENTS.md) for architecture and roadmap.
 
 ## Quick start
 
@@ -30,6 +30,9 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://photos/
 - Cluster: `lode-vein` storage nodes over gRPC. Each nugget is written to 3 veins (spread over
   zones, then hosts) and acknowledged after 2 are durable; reads fail over between replicas and
   re-verify every copy. Per-bucket replication: `x-lode-replication: N` on CreateBucket.
+- Healing: Canary (phi-accrual) marks silent veins suspect then down; Smelter re-replicates
+  everything they held; Assay scrubs every vein and repairs corrupt copies. Operate with
+  `lode veins`, `lode vein drain <id>`, `lode vein remove <id>`, `lode repairs`.
 - Storage: content-defined chunking (FastCDC, ~4 MiB) with dedup across objects and versions;
   unreferenced data is reclaimed by Tailings after a 24h grace window.
 - Path-style addressing only. Not yet: copy, ACLs/policies, tagging, lifecycle, SSE,
@@ -40,7 +43,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://photos/
 ```bash
 make build test lint
 LODE_TEST_DSN=postgres://localhost/lode_test make test   # include Postgres-backed tests
-make up && make e2e && make corruption && make replication
+make up && make e2e && make corruption && make replication && make chaos
 ```
 
 Licensed under the [Apache License 2.0](LICENSE).
