@@ -42,7 +42,8 @@ type Server struct {
 
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
-	recent  [][]byte // last events, replayed to new clients
+	recent  [][]byte     // last events, replayed to new clients
+	trend   []TrendPoint // sampled redundancy history
 
 	mcpOnce sync.Once
 	mcp     *mcp.ClientSession
@@ -86,6 +87,7 @@ func (s *Server) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			s.sample(ctx)
 			if !s.hasClients() {
 				continue
 			}
@@ -97,6 +99,30 @@ func (s *Server) Run(ctx context.Context) {
 			s.broadcast("snapshot", snap, false)
 		}
 	}
+}
+
+// TrendPoint is one sample of redundancy over time.
+type TrendPoint struct {
+	Time            time.Time `json:"t"`
+	UnderReplicated int64     `json:"under_replicated"`
+	OpenRepairs     int64     `json:"open_repairs"`
+}
+
+const trendLen = 900 // 30 minutes at the default 2s interval
+
+// sample records redundancy whether or not anyone is watching, so a page
+// opened mid-incident still shows how it developed.
+func (s *Server) sample(ctx context.Context) {
+	st, err := s.opts.Ledger.RepairStats(ctx)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.trend = append(s.trend, TrendPoint{Time: time.Now().UTC(), UnderReplicated: st.UnderReplicated, OpenRepairs: st.Queued + st.Leased})
+	if len(s.trend) > trendLen {
+		s.trend = s.trend[len(s.trend)-trendLen:]
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) hasClients() bool {
@@ -140,6 +166,7 @@ type Snapshot struct {
 	Totals  ledger.ClusterTotals  `json:"totals"`
 	Repairs ledger.RepairStats    `json:"repairs"`
 	Health  []ledger.BucketHealth `json:"health"`
+	Trend   []TrendPoint          `json:"trend"`
 	// Status is "green" (fully redundant, no open repairs), "repairing"
 	// or "degraded" (under-replicated with nothing running), "red" if data
 	// is unreadable.
@@ -191,11 +218,14 @@ func (s *Server) Snapshot(ctx context.Context) (Snapshot, error) {
 		snap.Status = "red"
 	case snap.Repairs.UnderReplicated == 0 && snap.Repairs.Queued+snap.Repairs.Leased == 0:
 		snap.Status = "green"
-	case snap.Repairs.Queued+snap.Repairs.Leased > 0:
+	case snap.Repairs.Leased+snap.Repairs.Runnable > 0:
 		snap.Status = "repairing"
 	default:
-		snap.Status = "degraded"
+		snap.Status = "degraded" // under-replicated, and repairs are waiting (e.g. for capacity)
 	}
+	s.mu.Lock()
+	snap.Trend = append([]TrendPoint(nil), s.trend...)
+	s.mu.Unlock()
 	return snap, nil
 }
 
