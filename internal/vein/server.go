@@ -158,7 +158,7 @@ func (s *Store) Usage() (capacity, used int64, err error) {
 	if err := syscall.Statfs(s.dir, &fs); err != nil {
 		return 0, 0, err
 	}
-	capacity = int64(fs.Blocks) * int64(fs.Bsize) // #nosec G115 -- filesystem sizes fit in int64
+	capacity = int64(fs.Blocks) * int64(fs.Bsize) //nolint:unconvert,gosec // field types differ by OS; sizes fit in int64
 	nums, err := s.segments()
 	if err != nil {
 		return 0, 0, err

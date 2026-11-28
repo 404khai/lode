@@ -19,14 +19,18 @@ aws s3 cp "$work/obj" "s3://$bucket/obj" >/dev/null
 
 # Overwrite 4 bytes inside every copy of the object (found by content).
 corrupt() {
-  docker run --rm -v "$1:/data" -v "$work:/w:ro" alpine sh -c '
-    pat=$(od -An -tx1 -j 50000 -N 16 /w/obj | tr -d " \n")
-    for seg in /data/segments/*.seg; do
-      off=$(od -An -tx1 -v "$seg" | tr -d " \n" | grep -bo "$pat" | head -1 | cut -d: -f1)
-      [ -n "$off" ] || continue
-      printf "\377\377\377\377" | dd of="$seg" bs=1 seek=$((off / 2)) conv=notrunc 2>/dev/null
-      echo hit
-    done'
+  docker run --rm -v "$1:/data" -v "$work:/w:ro" python:3-alpine python3 -c '
+import glob
+pat = open("/w/obj", "rb").read()[50000:50016]
+for seg in glob.glob("/data/segments/*.seg"):
+    with open(seg, "r+b") as f:
+        data = f.read()
+        off = data.find(pat)
+        if off >= 0:
+            f.seek(off)
+            f.write(b"\xff\xff\xff\xff")
+            print("hit")
+'
 }
 
 holders=()
