@@ -34,12 +34,13 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // ingest reads, chunks and stores a request body, verifying every declared
-// digest. Each nugget is touched in the Ledger before it is written to the
-// vein, so Tailings cannot reclaim it while the upload is in flight. On
-// failure the written nuggets stay unreferenced and are reclaimed after the
-// grace window.
-func (s *Server) ingest(req *request, maxSize int64) (*ingested, error) {
+// digest. Each nugget is touched in the Ledger before it is written to its
+// replicas, so Tailings cannot reclaim it while the upload is in flight, and
+// is written to a quorum of veins chosen by Survey. On failure the written
+// nuggets stay unreferenced and are reclaimed after the grace window.
+func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ingested, error) {
 	r := req.r
+	replicas, quorum := s.writePolicy(bucket)
 	var md5Want []byte
 	if v := r.Header.Get("Content-MD5"); v != "" {
 		var err error
@@ -85,11 +86,17 @@ func (s *Server) ingest(req *request, maxSize int64) (*ingested, error) {
 			h.Write(data)
 		}
 		ref := ledger.NuggetRef{ID: nugget.Sum(data), Length: int64(len(data))}
-		if err := s.ledger.TouchNuggets(r.Context(), []ledger.NuggetRef{ref}); err != nil {
+		existing, err := s.ledger.TouchNugget(r.Context(), ref)
+		if err != nil {
 			return nil, err
 		}
-		if err := s.vein.Put(ref.ID, data); err != nil {
+		written, serr := s.cluster.Store(r.Context(), ref.ID, data, existing, replicas, quorum)
+		// Record every copy that landed, even on failure, so Tailings can find it.
+		if err := s.ledger.AddReplicas(r.Context(), ref.ID, written); err != nil {
 			return nil, err
+		}
+		if serr != nil {
+			return nil, serr
 		}
 		out.nuggets = append(out.nuggets, ref)
 		out.size += ref.Length

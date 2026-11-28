@@ -83,7 +83,11 @@ func (s *Server) putObject(req *request) error {
 	if err != nil {
 		return err
 	}
-	in, err := s.ingest(req, maxPutSize)
+	bucket, err := s.ledger.HeadBucket(req.r.Context(), req.bucket)
+	if err != nil {
+		return err
+	}
+	in, err := s.ingest(req, maxPutSize, bucket)
 	if err != nil {
 		return err
 	}
@@ -290,7 +294,7 @@ func (s *Server) streamNuggets(req *request, o *ledger.Object, rng byteRange, st
 		if nStart > rng.end {
 			break
 		}
-		data, err := s.vein.Get(n.ID)
+		data, err := s.cluster.Read(req.r.Context(), n)
 		if err == nil && int64(len(data)) != n.Length {
 			err = fmt.Errorf("nugget %s has length %d, manifest says %d", n.ID, len(data), n.Length)
 		}

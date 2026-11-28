@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,15 +16,8 @@ type Config struct {
 	Metrics  Metrics  `yaml:"metrics"`
 	Ledger   Ledger   `yaml:"ledger"`
 	Vein     Vein     `yaml:"vein"`
+	Cluster  Cluster  `yaml:"cluster"`
 	Tailings Tailings `yaml:"tailings"`
-}
-
-// Tailings configures garbage collection.
-type Tailings struct {
-	Grace        time.Duration `yaml:"grace"`         // keep unreferenced nuggets this long
-	Interval     time.Duration `yaml:"interval"`      // time between passes
-	UploadExpiry time.Duration `yaml:"upload_expiry"` // abort multipart uploads older than this; 0 disables
-	CompactRatio float64       `yaml:"compact_ratio"` // compact segments at least this fraction dead
 }
 
 type Log struct {
@@ -32,9 +26,11 @@ type Log struct {
 }
 
 type Adit struct {
-	Listen     string      `yaml:"listen"`
-	Region     string      `yaml:"region"`
-	AccessKeys []AccessKey `yaml:"access_keys"`
+	Listen      string      `yaml:"listen"`
+	Region      string      `yaml:"region"`
+	AccessKeys  []AccessKey `yaml:"access_keys"`
+	Replication int         `yaml:"replication"`  // default replicas per nugget
+	WriteQuorum int         `yaml:"write_quorum"` // 0 = majority of replication
 }
 
 // AccessKey is a static SigV4 credential.
@@ -43,8 +39,22 @@ type AccessKey struct {
 	SecretKey string `yaml:"secret_key"`
 }
 
+// Vein configures a storage node daemon.
 type Vein struct {
-	DataDir string `yaml:"data_dir"`
+	ID              string        `yaml:"id"`        // stable identity; defaults to one persisted in data_dir
+	Listen          string        `yaml:"listen"`    // gRPC listen address
+	Advertise       string        `yaml:"advertise"` // address Adit dials; defaults to listen
+	Zone            string        `yaml:"zone"`
+	Host            string        `yaml:"host"`
+	DataDir         string        `yaml:"data_dir"`
+	Heartbeat       time.Duration `yaml:"heartbeat"`
+	CompactInterval time.Duration `yaml:"compact_interval"`
+	CompactRatio    float64       `yaml:"compact_ratio"` // compact segments at least this fraction dead
+}
+
+// Cluster configures Adit's view of the veins.
+type Cluster struct {
+	StaleAfter time.Duration `yaml:"stale_after"` // veins with older heartbeats take no writes
 }
 
 type Metrics struct {
@@ -55,15 +65,26 @@ type Ledger struct {
 	DSN string `yaml:"dsn"`
 }
 
+// Tailings configures garbage collection.
+type Tailings struct {
+	Grace        time.Duration `yaml:"grace"`         // keep unreferenced nuggets this long
+	Interval     time.Duration `yaml:"interval"`      // time between passes
+	UploadExpiry time.Duration `yaml:"upload_expiry"` // abort multipart uploads older than this; 0 disables
+}
+
 // Default returns the configuration used when no file or env is given.
 func Default() Config {
 	return Config{
 		Log:     Log{Level: "info", Format: "json"},
-		Adit:    Adit{Listen: ":9000", Region: "us-east-1"},
+		Adit:    Adit{Listen: ":9000", Region: "us-east-1", Replication: 3},
 		Metrics: Metrics{Listen: ":9090"},
-		Vein:    Vein{DataDir: "./data"},
+		Vein: Vein{
+			Listen: ":7000", DataDir: "./data", Heartbeat: 2 * time.Second,
+			CompactInterval: 10 * time.Minute, CompactRatio: 0.5,
+		},
+		Cluster: Cluster{StaleAfter: 10 * time.Second},
 		Tailings: Tailings{
-			Grace: 24 * time.Hour, Interval: 5 * time.Minute, UploadExpiry: 7 * 24 * time.Hour, CompactRatio: 0.5,
+			Grace: 24 * time.Hour, Interval: 5 * time.Minute, UploadExpiry: 7 * 24 * time.Hour,
 		},
 	}
 }
@@ -92,16 +113,34 @@ func applyEnv(cfg *Config) {
 		"LODE_ADIT_REGION":    &cfg.Adit.Region,
 		"LODE_METRICS_LISTEN": &cfg.Metrics.Listen,
 		"LODE_LEDGER_DSN":     &cfg.Ledger.DSN,
+		"LODE_VEIN_ID":        &cfg.Vein.ID,
+		"LODE_VEIN_LISTEN":    &cfg.Vein.Listen,
+		"LODE_VEIN_ADVERTISE": &cfg.Vein.Advertise,
+		"LODE_VEIN_ZONE":      &cfg.Vein.Zone,
+		"LODE_VEIN_HOST":      &cfg.Vein.Host,
 		"LODE_VEIN_DATA_DIR":  &cfg.Vein.DataDir,
 	} {
 		if v, ok := os.LookupEnv(env); ok {
 			*dst = v
 		}
 	}
+	for env, dst := range map[string]*int{
+		"LODE_ADIT_REPLICATION":  &cfg.Adit.Replication,
+		"LODE_ADIT_WRITE_QUORUM": &cfg.Adit.WriteQuorum,
+	} {
+		if v, ok := os.LookupEnv(env); ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				*dst = n
+			}
+		}
+	}
 	for env, dst := range map[string]*time.Duration{
 		"LODE_TAILINGS_GRACE":         &cfg.Tailings.Grace,
 		"LODE_TAILINGS_INTERVAL":      &cfg.Tailings.Interval,
 		"LODE_TAILINGS_UPLOAD_EXPIRY": &cfg.Tailings.UploadExpiry,
+		"LODE_VEIN_HEARTBEAT":         &cfg.Vein.Heartbeat,
+		"LODE_VEIN_COMPACT_INTERVAL":  &cfg.Vein.CompactInterval,
+		"LODE_CLUSTER_STALE_AFTER":    &cfg.Cluster.StaleAfter,
 	} {
 		if v, ok := os.LookupEnv(env); ok {
 			if d, err := time.ParseDuration(v); err == nil {
@@ -115,21 +154,41 @@ func applyEnv(cfg *Config) {
 	}
 }
 
-// Validate reports configuration that cannot work.
-func (c Config) Validate() error {
+// ValidateAdit reports configuration that cannot work for lode-adit.
+func (c Config) ValidateAdit() error {
 	if c.Ledger.DSN == "" {
 		return fmt.Errorf("config: ledger.dsn (LODE_LEDGER_DSN) is required")
 	}
 	if len(c.Adit.AccessKeys) == 0 {
 		return fmt.Errorf("config: at least one adit.access_keys entry (or LODE_ACCESS_KEY/LODE_SECRET_KEY) is required")
 	}
-	if c.Tailings.Interval <= 0 {
-		return fmt.Errorf("config: tailings.interval must be positive")
-	}
 	for _, k := range c.Adit.AccessKeys {
 		if k.AccessKey == "" || k.SecretKey == "" {
 			return fmt.Errorf("config: access keys need both access_key and secret_key")
 		}
+	}
+	if c.Adit.Replication < 1 || c.Adit.Replication > 16 {
+		return fmt.Errorf("config: adit.replication must be between 1 and 16")
+	}
+	if c.Adit.WriteQuorum < 0 || c.Adit.WriteQuorum > c.Adit.Replication {
+		return fmt.Errorf("config: adit.write_quorum must be between 0 and adit.replication")
+	}
+	if c.Tailings.Interval <= 0 {
+		return fmt.Errorf("config: tailings.interval must be positive")
+	}
+	return nil
+}
+
+// ValidateVein reports configuration that cannot work for lode-vein.
+func (c Config) ValidateVein() error {
+	if c.Ledger.DSN == "" {
+		return fmt.Errorf("config: ledger.dsn (LODE_LEDGER_DSN) is required")
+	}
+	if c.Vein.Listen == "" || c.Vein.DataDir == "" {
+		return fmt.Errorf("config: vein.listen and vein.data_dir are required")
+	}
+	if c.Vein.Heartbeat <= 0 {
+		return fmt.Errorf("config: vein.heartbeat must be positive")
 	}
 	return nil
 }

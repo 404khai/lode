@@ -15,9 +15,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/404khai/lode/internal/cluster"
 	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
-	"github.com/404khai/lode/internal/vein"
 )
 
 const s3Namespace = "http://s3.amazonaws.com/doc/2006-03-01/"
@@ -27,8 +27,10 @@ type Options struct {
 	Logger      *slog.Logger
 	Registerer  prometheus.Registerer
 	Ledger      *ledger.Ledger
-	Vein        *vein.Store
+	Cluster     *cluster.Client
 	Events      *events.Bus
+	Replication int // default replicas per nugget
+	WriteQuorum int // replicas that must be durable before a write succeeds; 0 = majority
 	Region      string
 	Credentials map[string]string // access key -> secret key
 	Now         func() time.Time
@@ -38,8 +40,10 @@ type Options struct {
 type Server struct {
 	log         *slog.Logger
 	ledger      *ledger.Ledger
-	vein        *vein.Store
+	cluster     *cluster.Client
 	bus         *events.Bus
+	replication int
+	quorum      int
 	region      string
 	credentials map[string]string
 	now         func() time.Time
@@ -58,12 +62,17 @@ func New(opts Options) *Server {
 	if opts.Region == "" {
 		opts.Region = "us-east-1"
 	}
+	if opts.Replication <= 0 {
+		opts.Replication = 3
+	}
 	f := promauto.With(opts.Registerer)
 	return &Server{
 		log:         opts.Logger,
 		ledger:      opts.Ledger,
-		vein:        opts.Vein,
+		cluster:     opts.Cluster,
 		bus:         opts.Events,
+		replication: opts.Replication,
+		quorum:      opts.WriteQuorum,
 		region:      opts.Region,
 		credentials: opts.Credentials,
 		now:         opts.Now,
@@ -299,6 +308,9 @@ func (s *Server) toAPIError(req *request, err error) *apiError {
 		return errEntityTooSmall
 	case errors.Is(err, ledger.ErrPreconditionFailed):
 		return errPreconditionFailed
+	case errors.Is(err, cluster.ErrInsufficientReplicas), errors.Is(err, cluster.ErrUnavailable):
+		s.log.Warn("storage unavailable", "op", req.op, "bucket", req.bucket, "key", req.key, "request_id", req.id, "err", err)
+		return errServiceUnavailable
 	}
 	s.log.Error("internal error", "op", req.op, "bucket", req.bucket, "key", req.key, "request_id", req.id, "err", err)
 	return errInternal
@@ -324,6 +336,19 @@ func (s *Server) writeXML(req *request, status int, v any) {
 
 func (s *Server) emit(typ string, attrs map[string]any) {
 	s.bus.Publish(events.Event{Type: typ, Component: "adit", Attrs: attrs})
+}
+
+// writePolicy returns the replica count and write quorum for a bucket.
+func (s *Server) writePolicy(b ledger.Bucket) (replicas, quorum int) {
+	replicas = s.replication
+	if b.Replication > 0 {
+		replicas = b.Replication
+	}
+	quorum = s.quorum
+	if quorum <= 0 {
+		quorum = replicas/2 + 1
+	}
+	return replicas, min(quorum, replicas)
 }
 
 func validBucketName(name string) bool {

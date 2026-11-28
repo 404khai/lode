@@ -1,4 +1,17 @@
 name: lode
+
+x-vein: &vein
+  build:
+    context: ..
+    args: { BIN: lode-vein }
+  environment: &vein-env
+    LODE_LEDGER_DSN: postgres://lode:lode@postgres:5432/lode?sslmode=disable
+    LODE_VEIN_LISTEN: ":7000"
+    LODE_VEIN_DATA_DIR: /data
+    LODE_LOG_FORMAT: text
+  depends_on:
+    postgres: { condition: service_healthy }
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -13,6 +26,24 @@ services:
       retries: 30
     volumes: [pgdata:/var/lib/postgresql/data]
 
+  # Four veins in two zones; replication 3 puts copies in both zones.
+  vein1:
+    <<: *vein
+    environment: { <<: *vein-env, LODE_VEIN_ID: vein1, LODE_VEIN_ADVERTISE: "vein1:7000", LODE_VEIN_ZONE: a, LODE_VEIN_HOST: vein1 }
+    volumes: [vein1:/data]
+  vein2:
+    <<: *vein
+    environment: { <<: *vein-env, LODE_VEIN_ID: vein2, LODE_VEIN_ADVERTISE: "vein2:7000", LODE_VEIN_ZONE: a, LODE_VEIN_HOST: vein2 }
+    volumes: [vein2:/data]
+  vein3:
+    <<: *vein
+    environment: { <<: *vein-env, LODE_VEIN_ID: vein3, LODE_VEIN_ADVERTISE: "vein3:7000", LODE_VEIN_ZONE: b, LODE_VEIN_HOST: vein3 }
+    volumes: [vein3:/data]
+  vein4:
+    <<: *vein
+    environment: { <<: *vein-env, LODE_VEIN_ID: vein4, LODE_VEIN_ADVERTISE: "vein4:7000", LODE_VEIN_ZONE: b, LODE_VEIN_HOST: vein4 }
+    volumes: [vein4:/data]
+
   adit:
     build:
       context: ..
@@ -20,11 +51,13 @@ services:
     command: ["-config", "/etc/lode/adit.yaml"]
     volumes:
       - ./adit.example.yaml:/etc/lode/adit.yaml:ro
-      - veindata:/data
     ports: ["9000:9000", "9090:9090"]
     depends_on:
       postgres: { condition: service_healthy }
 
 volumes:
   pgdata:
-  veindata:
+  vein1:
+  vein2:
+  vein3:
+  vein4:

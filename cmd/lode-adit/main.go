@@ -20,12 +20,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/404khai/lode/internal/adit"
+	"github.com/404khai/lode/internal/cluster"
 	"github.com/404khai/lode/internal/config"
 	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/logging"
 	"github.com/404khai/lode/internal/tailings"
-	"github.com/404khai/lode/internal/vein"
 	"github.com/404khai/lode/internal/version"
 )
 
@@ -66,7 +66,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateAdit(); err != nil {
 		return err
 	}
 	log := logging.New(os.Stderr, cfg.Log.Level, cfg.Log.Format, "adit")
@@ -90,30 +90,30 @@ func run() error {
 	}
 
 	bus := events.NewBus()
-	store, err := vein.Open(vein.Options{Dir: cfg.Vein.DataDir, Logger: log.With("component", "vein"), Registerer: reg, Events: bus})
-	if err != nil {
+	led := ledger.New(pool)
+	veins := cluster.New(cluster.Options{
+		Ledger: led, Logger: log.With("component", "cluster"), Registerer: reg, Events: bus,
+		StaleAfter: cfg.Cluster.StaleAfter,
+	})
+	defer veins.Close()
+	if err := veins.Refresh(ctx); err != nil {
 		return err
 	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			log.Error("close vein", "err", err)
-		}
-	}()
+	go veins.Run(ctx)
 
 	creds := make(map[string]string, len(cfg.Adit.AccessKeys))
 	for _, k := range cfg.Adit.AccessKeys {
 		creds[k.AccessKey] = k.SecretKey
 	}
-	led := ledger.New(pool)
 	srv := adit.New(adit.Options{
-		Logger: log, Registerer: reg, Ledger: led, Vein: store, Events: bus,
+		Logger: log, Registerer: reg, Ledger: led, Cluster: veins, Events: bus,
 		Region: cfg.Adit.Region, Credentials: creds,
+		Replication: cfg.Adit.Replication, WriteQuorum: cfg.Adit.WriteQuorum,
 	})
 
 	gc := tailings.New(tailings.Options{
-		Ledger: led, Vein: store, Logger: log.With("component", "tailings"), Registerer: reg, Events: bus,
-		Grace: cfg.Tailings.Grace, Interval: cfg.Tailings.Interval,
-		UploadExpiry: cfg.Tailings.UploadExpiry, CompactRatio: cfg.Tailings.CompactRatio,
+		Ledger: led, Veins: veins, Logger: log.With("component", "tailings"), Registerer: reg, Events: bus,
+		Grace: cfg.Tailings.Grace, Interval: cfg.Tailings.Interval, UploadExpiry: cfg.Tailings.UploadExpiry,
 	})
 	gcDone := make(chan struct{})
 	go func() { defer close(gcDone); gc.Run(ctx) }()

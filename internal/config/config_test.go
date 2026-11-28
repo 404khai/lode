@@ -45,7 +45,7 @@ func TestLoadMissingFile(t *testing.T) {
 
 func TestAccessKeyEnvAndValidate(t *testing.T) {
 	cfg := Default()
-	if err := cfg.Validate(); err == nil {
+	if err := cfg.ValidateAdit(); err == nil {
 		t.Fatal("empty config should not validate")
 	}
 	t.Setenv("LODE_ACCESS_KEY", "ak")
@@ -58,7 +58,7 @@ func TestAccessKeyEnvAndValidate(t *testing.T) {
 	if len(cfg.Adit.AccessKeys) != 1 || cfg.Adit.AccessKeys[0].SecretKey != "sk" {
 		t.Fatalf("keys = %+v", cfg.Adit.AccessKeys)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateAdit(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -4,6 +4,8 @@ log:
 adit:
   listen: ":9000"
   region: us-east-1
+  replication: 3     # copies of every nugget; buckets can override with x-lode-replication
+  write_quorum: 2    # copies that must be durable before a write is acknowledged
   # Static SigV4 credentials. LODE_ACCESS_KEY / LODE_SECRET_KEY add one more.
   access_keys:
     - access_key: lode
@@ -12,5 +14,5 @@ metrics:
   listen: ":9090"
 ledger:
   dsn: postgres://lode:lode@postgres:5432/lode?sslmode=disable
-vein:
-  data_dir: /data
+cluster:
+  stale_after: 10s

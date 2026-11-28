@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/404khai/lode/internal/ledger"
@@ -71,7 +72,15 @@ func (s *Server) createBucket(req *request) error {
 	if _, err := s.readSmallBody(req); err != nil {
 		return err
 	}
-	err := s.ledger.CreateBucket(req.r.Context(), req.bucket)
+	replication := 0
+	if v := req.r.Header.Get("X-Lode-Replication"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 1 || n > 16 {
+			return errf(http.StatusBadRequest, "InvalidArgument", "x-lode-replication must be between 1 and 16")
+		}
+		replication = n
+	}
+	err := s.ledger.CreateBucket(req.r.Context(), req.bucket, replication)
 	// In us-east-1, S3 answers 200 when you re-create a bucket you own.
 	if errors.Is(err, ledger.ErrBucketExists) && s.region == "us-east-1" {
 		err = nil

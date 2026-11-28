@@ -1,11 +1,13 @@
 // Package tailings is Lode's garbage collector. Each pass it aborts expired
-// multipart uploads, removes nuggets the Ledger reports unreferenced for
-// longer than the grace window, and compacts vein segments. Passes are
-// idempotent; only the process holding the Tailings leader lock runs them.
+// multipart uploads and removes, from every vein holding a replica, nuggets
+// the Ledger reports unreferenced for longer than the grace window. Veins
+// compact their own segments. Passes are idempotent; only the process
+// holding the Tailings leader lock runs them.
 package tailings
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"time"
@@ -15,8 +17,13 @@ import (
 
 	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
-	"github.com/404khai/lode/internal/vein"
+	"github.com/404khai/lode/internal/nugget"
 )
+
+// Remover deletes nugget replicas from veins.
+type Remover interface {
+	Delete(ctx context.Context, vein string, id nugget.ID) error
+}
 
 // LeaderLock is the advisory lock key held by the active Tailings worker.
 const LeaderLock = 0x6c6f6465_7461696c // "lodetail"
@@ -25,7 +32,7 @@ const batchSize = 500
 
 type Options struct {
 	Ledger     *ledger.Ledger
-	Vein       *vein.Store
+	Veins      Remover
 	Logger     *slog.Logger
 	Registerer prometheus.Registerer
 	Events     *events.Bus
@@ -33,7 +40,6 @@ type Options struct {
 	Grace        time.Duration // unreferenced nuggets older than this are reclaimed
 	Interval     time.Duration // time between passes
 	UploadExpiry time.Duration // multipart uploads older than this are aborted; 0 disables
-	CompactRatio float64       // compact segments at least this fraction dead
 	Now          func() time.Time
 }
 
@@ -41,14 +47,14 @@ type Options struct {
 type Stats struct {
 	UploadsAborted   int
 	NuggetsReclaimed int
-	BytesCompacted   int64
+	NuggetsDeferred  int // unreferenced but a replica's vein could not be reached
 }
 
 type Worker struct {
 	opts                       Options
 	log                        *slog.Logger
 	passes, reclaimed, aborted prometheus.Counter
-	compacted                  prometheus.Counter
+	deferred                   prometheus.Counter
 	lastPass                   prometheus.Gauge
 }
 
@@ -65,9 +71,6 @@ func New(opts Options) *Worker {
 	if opts.Interval <= 0 {
 		opts.Interval = time.Minute
 	}
-	if opts.CompactRatio <= 0 {
-		opts.CompactRatio = 0.5
-	}
 	f := promauto.With(opts.Registerer)
 	counter := func(name, help string) prometheus.Counter {
 		return f.NewCounter(prometheus.CounterOpts{Namespace: "lode", Subsystem: "tailings", Name: name, Help: help})
@@ -78,7 +81,7 @@ func New(opts Options) *Worker {
 		passes:    counter("passes_total", "Completed GC passes."),
 		reclaimed: counter("nuggets_reclaimed_total", "Unreferenced nuggets removed."),
 		aborted:   counter("uploads_aborted_total", "Expired multipart uploads aborted."),
-		compacted: counter("bytes_compacted_total", "Segment bytes freed by compaction."),
+		deferred:  counter("nuggets_deferred_total", "Reclaims postponed because a replica's vein was unreachable."),
 		lastPass: f.NewGauge(prometheus.GaugeOpts{Namespace: "lode", Subsystem: "tailings", Name: "last_pass_timestamp_seconds",
 			Help: "Unix time of the last completed pass."}),
 	}
@@ -145,7 +148,21 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 		}
 		progress := 0
 		for _, id := range ids {
-			ok, err := w.opts.Ledger.ReclaimNugget(ctx, id, cutoff, func() error { return w.opts.Vein.Delete(id) })
+			ok, err := w.opts.Ledger.ReclaimNugget(ctx, id, cutoff, func(veins []string) error {
+				for _, v := range veins {
+					if err := w.opts.Veins.Delete(ctx, v, id); err != nil {
+						return &deferredError{err}
+					}
+				}
+				return nil
+			})
+			var de *deferredError
+			if errors.As(err, &de) {
+				st.NuggetsDeferred++
+				w.deferred.Inc()
+				w.log.Debug("reclaim deferred", "nugget", id.String(), "err", de.err)
+				continue
+			}
 			if err != nil {
 				return st, err
 			}
@@ -160,20 +177,13 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 		}
 	}
 
-	cs, err := w.opts.Vein.Compact(w.opts.CompactRatio)
-	if err != nil {
-		return st, err
-	}
-	st.BytesCompacted = cs.BytesReclaimed
-	w.compacted.Add(float64(cs.BytesReclaimed))
-
 	w.passes.Inc()
 	w.lastPass.Set(float64(w.opts.Now().Unix()))
 	if st != (Stats{}) {
 		w.log.Info("tailings pass", "uploads_aborted", st.UploadsAborted, "nuggets_reclaimed", st.NuggetsReclaimed,
-			"bytes_compacted", st.BytesCompacted)
+			"nuggets_deferred", st.NuggetsDeferred)
 		w.emit("gc.pass", map[string]any{"uploads_aborted": st.UploadsAborted, "nuggets_reclaimed": st.NuggetsReclaimed,
-			"bytes_compacted": st.BytesCompacted})
+			"nuggets_deferred": st.NuggetsDeferred})
 	}
 	return st, nil
 }
@@ -181,3 +191,10 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 func (w *Worker) emit(typ string, attrs map[string]any) {
 	w.opts.Events.Publish(events.Event{Type: typ, Component: "tailings", Attrs: attrs})
 }
+
+// deferredError marks a reclaim that failed because a vein was unreachable;
+// the nugget is retried on a later pass.
+type deferredError struct{ err error }
+
+func (e *deferredError) Error() string { return e.err.Error() }
+func (e *deferredError) Unwrap() error { return e.err }
