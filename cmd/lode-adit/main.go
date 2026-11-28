@@ -20,11 +20,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/404khai/lode/internal/adit"
+	"github.com/404khai/lode/internal/canary"
 	"github.com/404khai/lode/internal/cluster"
 	"github.com/404khai/lode/internal/config"
 	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/logging"
+	"github.com/404khai/lode/internal/nugget"
+	"github.com/404khai/lode/internal/smelter"
 	"github.com/404khai/lode/internal/tailings"
 	"github.com/404khai/lode/internal/version"
 )
@@ -91,9 +94,20 @@ func run() error {
 
 	bus := events.NewBus()
 	led := ledger.New(pool)
+	queueRepair := func(ctx context.Context, id nugget.ID, reason, vein string) {
+		if err := led.EnqueueRepair(context.WithoutCancel(ctx), id, reason, vein); err != nil {
+			log.Error("queue repair", "nugget", id.String(), "reason", reason, "err", err)
+		}
+	}
 	veins := cluster.New(cluster.Options{
 		Ledger: led, Logger: log.With("component", "cluster"), Registerer: reg, Events: bus,
 		StaleAfter: cfg.Cluster.StaleAfter,
+		OnUnderReplicated: func(ctx context.Context, id nugget.ID) {
+			queueRepair(ctx, id, ledger.ReasonUnderReplicated, "")
+		},
+		OnCorrupt: func(ctx context.Context, id nugget.ID, vein string) {
+			queueRepair(ctx, id, ledger.ReasonCorrupt, vein)
+		},
 	})
 	defer veins.Close()
 	if err := veins.Refresh(ctx); err != nil {
@@ -115,6 +129,20 @@ func run() error {
 		Ledger: led, Veins: veins, Logger: log.With("component", "tailings"), Registerer: reg, Events: bus,
 		Grace: cfg.Tailings.Grace, Interval: cfg.Tailings.Interval, UploadExpiry: cfg.Tailings.UploadExpiry,
 	})
+	host, _ := os.Hostname()
+	detector := canary.New(canary.Options{
+		Ledger: led, Logger: log.With("component", "canary"), Registerer: reg, Events: bus,
+		SuspectPhi: cfg.Canary.SuspectPhi, DownAfter: cfg.Canary.DownAfter, Interval: cfg.Canary.Interval,
+		ExpectedInterval: 2 * time.Second,
+	})
+	repair := smelter.New(smelter.Options{
+		Ledger: led, Cluster: veins, Logger: log.With("component", "smelter"), Registerer: reg, Events: bus,
+		Owner: fmt.Sprintf("%s-%d", host, os.Getpid()), Workers: cfg.Smelter.Workers,
+		BandwidthBytes: cfg.Smelter.BandwidthBytes, DefaultReplication: cfg.Adit.Replication,
+	})
+	go detector.Run(ctx)
+	go repair.Run(ctx)
+
 	gcDone := make(chan struct{})
 	go func() { defer close(gcDone); gc.Run(ctx) }()
 	defer func() { stop(); <-gcDone }()

@@ -179,3 +179,21 @@ func TestRotationAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOperationsAfterCloseFailCleanly(t *testing.T) {
+	s := open(t, t.TempDir(), 0)
+	data := []byte("x")
+	id := nugget.Sum(data)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	if err := s.Put(id, data); !errors.Is(err, ErrClosed) {
+		t.Fatalf("put after close: %v", err)
+	}
+	if _, err := s.Get(id); !errors.Is(err, ErrClosed) {
+		t.Fatalf("get after close: %v", err)
+	}
+}

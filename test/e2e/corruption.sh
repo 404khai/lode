@@ -50,3 +50,5 @@ if aws s3 cp "s3://$bucket/obj" "$work/all" >/dev/null 2>"$work/err"; then
 fi
 grep -qiE "internal.?error|500" "$work/err" || { echo "FAIL: unexpected error: $(cat "$work/err")" >&2; exit 1; }
 echo "corruption: every replica corrupt, read refused ($(head -c 100 "$work/err"))"
+# The object is unrecoverable by design; delete it so repair stops trying.
+aws s3 rm "s3://$bucket/obj" >/dev/null && aws s3 rb "s3://$bucket" >/dev/null

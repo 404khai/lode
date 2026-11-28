@@ -18,6 +18,21 @@ type Config struct {
 	Vein     Vein     `yaml:"vein"`
 	Cluster  Cluster  `yaml:"cluster"`
 	Tailings Tailings `yaml:"tailings"`
+	Canary   Canary   `yaml:"canary"`
+	Smelter  Smelter  `yaml:"smelter"`
+}
+
+// Canary configures failure detection.
+type Canary struct {
+	SuspectPhi float64       `yaml:"suspect_phi"` // phi above which a vein takes no writes
+	DownAfter  time.Duration `yaml:"down_after"`  // silence after which a vein is down and repaired around
+	Interval   time.Duration `yaml:"interval"`
+}
+
+// Smelter configures repair.
+type Smelter struct {
+	Workers        int   `yaml:"workers"`
+	BandwidthBytes int64 `yaml:"bandwidth_bytes"` // repair writes per second; 0 = unlimited
 }
 
 type Log struct {
@@ -50,6 +65,8 @@ type Vein struct {
 	Heartbeat       time.Duration `yaml:"heartbeat"`
 	CompactInterval time.Duration `yaml:"compact_interval"`
 	CompactRatio    float64       `yaml:"compact_ratio"` // compact segments at least this fraction dead
+	ScrubRate       int64         `yaml:"scrub_rate"`    // Assay bytes per second; 0 = unlimited
+	ScrubPause      time.Duration `yaml:"scrub_pause"`   // wait between scrub passes; negative disables Assay
 }
 
 // Cluster configures Adit's view of the veins.
@@ -81,7 +98,10 @@ func Default() Config {
 		Vein: Vein{
 			Listen: ":7000", DataDir: "./data", Heartbeat: 2 * time.Second,
 			CompactInterval: 10 * time.Minute, CompactRatio: 0.5,
+			ScrubRate: 32 << 20, ScrubPause: time.Hour,
 		},
+		Canary:  Canary{SuspectPhi: 8, DownAfter: 30 * time.Second, Interval: time.Second},
+		Smelter: Smelter{Workers: 4, BandwidthBytes: 64 << 20},
 		Cluster: Cluster{StaleAfter: 10 * time.Second},
 		Tailings: Tailings{
 			Grace: 24 * time.Hour, Interval: 5 * time.Minute, UploadExpiry: 7 * 24 * time.Hour,
@@ -127,9 +147,20 @@ func applyEnv(cfg *Config) {
 	for env, dst := range map[string]*int{
 		"LODE_ADIT_REPLICATION":  &cfg.Adit.Replication,
 		"LODE_ADIT_WRITE_QUORUM": &cfg.Adit.WriteQuorum,
+		"LODE_SMELTER_WORKERS":   &cfg.Smelter.Workers,
 	} {
 		if v, ok := os.LookupEnv(env); ok {
 			if n, err := strconv.Atoi(v); err == nil {
+				*dst = n
+			}
+		}
+	}
+	for env, dst := range map[string]*int64{
+		"LODE_SMELTER_BANDWIDTH_BYTES": &cfg.Smelter.BandwidthBytes,
+		"LODE_VEIN_SCRUB_RATE":         &cfg.Vein.ScrubRate,
+	} {
+		if v, ok := os.LookupEnv(env); ok {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 				*dst = n
 			}
 		}
@@ -140,6 +171,8 @@ func applyEnv(cfg *Config) {
 		"LODE_TAILINGS_UPLOAD_EXPIRY": &cfg.Tailings.UploadExpiry,
 		"LODE_VEIN_HEARTBEAT":         &cfg.Vein.Heartbeat,
 		"LODE_VEIN_COMPACT_INTERVAL":  &cfg.Vein.CompactInterval,
+		"LODE_VEIN_SCRUB_PAUSE":       &cfg.Vein.ScrubPause,
+		"LODE_CANARY_DOWN_AFTER":      &cfg.Canary.DownAfter,
 		"LODE_CLUSTER_STALE_AFTER":    &cfg.Cluster.StaleAfter,
 	} {
 		if v, ok := os.LookupEnv(env); ok {

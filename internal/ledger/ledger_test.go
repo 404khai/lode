@@ -349,7 +349,7 @@ func TestReclaimSafety(t *testing.T) {
 	_, _ = l.PutObject(ctx, "g", "live", version("live"), Condition{})
 	_, _ = l.PutObject(ctx, "g", "gone", version("gone"), Condition{})
 	_, _ = l.DeleteObject(ctx, "g", "gone", "")
-	_, _ = l.TouchNugget(ctx, NuggetRef{ID: nugget.Sum([]byte("inflight")), Length: 8})
+	_, _ = l.TouchNugget(ctx, NuggetRef{ID: nugget.Sum([]byte("inflight")), Length: 8}, 3)
 
 	future := time.Now().Add(time.Hour)
 	ids, err := l.ReclaimCandidates(ctx, future, 10)
@@ -393,13 +393,13 @@ func TestVeinsAndReplicas(t *testing.T) {
 		t.Fatalf("veins = %+v %v", vs, err)
 	}
 	ref := NuggetRef{ID: nugget.Sum([]byte("r")), Length: 1}
-	if have, err := l.TouchNugget(ctx, ref); err != nil || len(have) != 0 {
+	if have, err := l.TouchNugget(ctx, ref, 3); err != nil || len(have) != 0 {
 		t.Fatalf("touch = %v %v", have, err)
 	}
 	if err := l.AddReplicas(ctx, ref.ID, []string{"v2", "v1", "v2"}); err != nil {
 		t.Fatal(err)
 	}
-	if have, _ := l.TouchNugget(ctx, ref); len(have) != 2 || have[0] != "v1" {
+	if have, _ := l.TouchNugget(ctx, ref, 3); len(have) != 2 || have[0] != "v1" {
 		t.Fatalf("replicas = %v", have)
 	}
 	_ = l.CreateBucket(ctx, "rb", 2)
@@ -419,5 +419,30 @@ func TestVeinsAndReplicas(t *testing.T) {
 	}
 	if have, _ := l.Replicas(ctx, ref.ID); len(have) != 0 {
 		t.Fatalf("replica rows survived reclaim: %v", have)
+	}
+}
+
+func TestLostNuggetsAreNotRequeued(t *testing.T) {
+	l := newTestLedger(t)
+	ctx := context.Background()
+	id := nugget.Sum([]byte("gone"))
+	if err := l.EnqueueRepair(ctx, id, ReasonCorrupt, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	j, err := l.LeaseRepair(ctx, "w", time.Minute)
+	if err != nil || j == nil || j.BadVeins[0] != "v1" {
+		t.Fatalf("lease = %+v %v", j, err)
+	}
+	if err := l.EnqueueRepair(ctx, id, ReasonCorrupt, "v2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.FinishRepair(ctx, j.ID, "w", "lost", "no copy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.EnqueueRepair(ctx, id, ReasonCorrupt, "v3"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := l.RepairStats(ctx); st.Queued != 0 || st.Lost != 1 {
+		t.Fatalf("lost nugget re-queued: %+v", st)
 	}
 }
