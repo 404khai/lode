@@ -212,22 +212,25 @@ func (c *Client) dial(v ledger.VeinInfo) (*grpc.ClientConn, error) {
 	return grpc.NewClient(v.Addr, dial...)
 }
 
-// redial replaces a vein's connection, forcing a fresh address lookup.
-func (c *Client) redial(id string) {
+// redial replaces a vein's connection, forcing a fresh address lookup, and
+// clears its failure backoff. It reports whether a new connection was made.
+func (c *Client) redial(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	m := c.members[id]
 	if m == nil {
-		return
+		return false
 	}
 	conn, err := c.dial(m.info)
 	if err != nil {
 		c.log.Warn("redial vein", "vein", id, "err", err)
-		return
+		return false
 	}
 	_ = m.conn.Close()
 	m.conn, m.client = conn, lodev1.NewVeinServiceClient(conn)
+	m.downUntil = time.Time{}
 	c.log.Warn("connection reached the wrong vein; redialled", "vein", id)
+	return true
 }
 
 func (c *Client) usable(m *member, now time.Time) bool {
@@ -295,9 +298,7 @@ func (c *Client) observe(ctx context.Context, veinID, method string, start time.
 	if err == nil || !transportFailure(err) || ctx.Err() != nil {
 		return
 	}
-	if vein.IsWrongVein(err) {
-		go c.redial(veinID)
-	}
+
 	c.mu.Lock()
 	m := c.members[veinID]
 	wasUp := m != nil && c.opts.Now().After(m.downUntil)
@@ -311,8 +312,17 @@ func (c *Client) observe(ctx context.Context, veinID, method string, start time.
 	}
 }
 
-// Put stores data on one vein.
-func (c *Client) Put(ctx context.Context, veinID string, id nugget.ID, data []byte) (err error) {
+// Put stores data on one vein. A connection found to have drifted to
+// another vein is redialled and the call retried once.
+func (c *Client) Put(ctx context.Context, veinID string, id nugget.ID, data []byte) error {
+	err := c.put(ctx, veinID, id, data)
+	if vein.IsWrongVein(err) && c.redial(veinID) {
+		err = c.put(ctx, veinID, id, data)
+	}
+	return err
+}
+
+func (c *Client) put(ctx context.Context, veinID string, id nugget.ID, data []byte) (err error) {
 	m, err := c.member(veinID)
 	if err != nil {
 		return err
@@ -356,7 +366,15 @@ func (c *Client) Get(ctx context.Context, veinID string, id nugget.ID, length in
 
 // get reads one replica. With wait set, it waits (briefly) for a connection
 // that is reconnecting instead of failing fast.
-func (c *Client) get(ctx context.Context, veinID string, id nugget.ID, length int64, wait bool) (data []byte, err error) {
+func (c *Client) get(ctx context.Context, veinID string, id nugget.ID, length int64, wait bool) ([]byte, error) {
+	data, err := c.getOnce(ctx, veinID, id, length, wait)
+	if vein.IsWrongVein(err) && c.redial(veinID) {
+		data, err = c.getOnce(ctx, veinID, id, length, true)
+	}
+	return data, err
+}
+
+func (c *Client) getOnce(ctx context.Context, veinID string, id nugget.ID, length int64, wait bool) (data []byte, err error) {
 	m, err := c.member(veinID)
 	if err != nil {
 		return nil, err
