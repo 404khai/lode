@@ -44,6 +44,7 @@ var (
 	errMethodNotAllowed    = errf(http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource.")
 	errNotImplemented      = errf(http.StatusNotImplemented, "NotImplemented", "A header or operation you provided implies functionality that is not implemented.")
 	errServiceUnavailable  = errf(http.StatusServiceUnavailable, "ServiceUnavailable", "Not enough storage nodes are available. Please retry.")
+	errQuotaExceeded       = errf(http.StatusForbidden, "QuotaExceeded", "The request would exceed the storage quota of this bucket or access key.")
 	errInternal            = errf(http.StatusInternalServerError, "InternalError", "We encountered an internal error. Please try again.")
 	errNoSuchVersion       = errf(http.StatusNotFound, "NoSuchVersion", "The specified version does not exist.")
 	errNoSuchUpload        = errf(http.StatusNotFound, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed.")

@@ -27,7 +27,7 @@ func (s *Server) createUpload(req *request) error {
 	if aerr := checkCannedACL(req.r); aerr != nil {
 		return aerr
 	}
-	up := ledger.Upload{Headers: headers}
+	up := ledger.Upload{Headers: headers, AccessKey: req.auth.AccessKey}
 	if v := req.r.Header.Get("X-Amz-Tagging"); v != "" {
 		var aerr *apiError
 		if up.Tags, aerr = parseTagHeader(v, maxObjectTags); aerr != nil {
@@ -80,6 +80,9 @@ func (s *Server) uploadPart(req *request, uploadID string) error {
 	}
 	bucket, err := s.ledger.HeadBucket(req.r.Context(), req.bucket)
 	if err != nil {
+		return err
+	}
+	if err := s.precheckQuota(req); err != nil {
 		return err
 	}
 	in, err := s.ingest(req, maxPutSize, bucket, up.ChecksumAlgorithm)

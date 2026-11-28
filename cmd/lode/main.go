@@ -28,6 +28,8 @@ commands:
   vein undrain <id>          return a draining vein to service
   vein remove <id> [-force]  retire a vein now and forget its copies
   repairs                    show the repair queue and redundancy
+  quota set bucket|key <subject> [-bytes N] [-objects N]   (no limits removes the quota)
+  quota list                 show quotas and usage
   bucket create <name> [-ec K+M] [-replication N] [-placement P]
                              create a bucket with a Lode storage class
   version                    print the version
@@ -82,6 +84,8 @@ func run(args []string) error {
 		return veinCommand(ctx, led, args[1:])
 	case "bucket":
 		return bucketCommand(ctx, led, args[1:])
+	case "quota":
+		return quotaCommand(ctx, led, args[1:])
 	}
 	fs.Usage()
 	return fmt.Errorf("unknown command %q", args[0])
@@ -136,6 +140,48 @@ func veinCommand(ctx context.Context, led *ledger.Ledger, args []string) error {
 	default:
 		return fmt.Errorf("unknown vein action %q", action)
 	}
+	return nil
+}
+
+func quotaCommand(ctx context.Context, led *ledger.Ledger, args []string) error {
+	if len(args) == 1 && args[0] == "list" {
+		qs, us, err := led.Quotas(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "SCOPE\tSUBJECT\tBYTES\tMAX BYTES\tOBJECTS\tMAX OBJECTS")
+		lim := func(p *int64) string {
+			if p == nil {
+				return "-"
+			}
+			return fmt.Sprint(*p)
+		}
+		for i, q := range qs {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%d\t%s\n", q.Scope, q.Subject, us[i].Bytes, lim(q.MaxBytes), us[i].Objects, lim(q.MaxObjects))
+		}
+		return w.Flush()
+	}
+	if len(args) < 3 || args[0] != "set" {
+		return errors.New("usage: lode quota set bucket|key <subject> [-bytes N] [-objects N] | lode quota list")
+	}
+	fs := flag.NewFlagSet("quota set", flag.ContinueOnError)
+	maxBytes := fs.Int64("bytes", -1, "maximum stored bytes")
+	maxObjects := fs.Int64("objects", -1, "maximum stored object versions")
+	if err := fs.Parse(args[3:]); err != nil {
+		return err
+	}
+	q := ledger.Quota{Scope: args[1], Subject: args[2]}
+	if *maxBytes >= 0 {
+		q.MaxBytes = maxBytes
+	}
+	if *maxObjects >= 0 {
+		q.MaxObjects = maxObjects
+	}
+	if err := led.SetQuota(ctx, q); err != nil {
+		return err
+	}
+	fmt.Printf("%s %s: quota set\n", q.Scope, q.Subject)
 	return nil
 }
 

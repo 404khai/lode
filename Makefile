@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X github.com/404khai/lode/internal/version.Version=$(VERSION) 
 BINS    := lode lode-adit lode-vein
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: build test lint proto up down e2e corruption dedup replication erasure s3compat chaos
+.PHONY: build test lint proto up down e2e corruption dedup replication erasure lifecycle s3compat chaos
 
 build:
 	@mkdir -p bin
@@ -40,6 +40,9 @@ replication:
 
 erasure:
 	test/e2e/erasure.sh
+
+lifecycle:
+	test/e2e/lifecycle.sh
 
 s3compat:
 	test/s3compat/run.sh

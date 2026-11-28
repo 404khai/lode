@@ -30,6 +30,7 @@ type Upload struct {
 	ChecksumAlgorithm string
 	ChecksumType      string // COMPOSITE or FULL_OBJECT when ChecksumAlgorithm is set
 	Tags              map[string]string
+	AccessKey         string // who started the upload
 	Initiated         time.Time
 }
 
@@ -72,9 +73,9 @@ func (l *Ledger) CreateUpload(ctx context.Context, bucket, key string, u Upload)
 	}
 	id := newID()
 	tag, err := l.pool.Exec(ctx, `
-		INSERT INTO multipart_uploads (upload_id, bucket_id, key, headers, checksum_algorithm, checksum_type, tags)
-		SELECT $1, id, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7 FROM buckets WHERE name = $2`,
-		id, bucket, key, u.Headers, u.ChecksumAlgorithm, u.ChecksumType, u.Tags)
+		INSERT INTO multipart_uploads (upload_id, bucket_id, key, headers, checksum_algorithm, checksum_type, tags, access_key)
+		SELECT $1, id, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8 FROM buckets WHERE name = $2`,
+		id, bucket, key, u.Headers, u.ChecksumAlgorithm, u.ChecksumType, u.Tags, u.AccessKey)
 	if err == nil && tag.RowsAffected() == 0 {
 		return "", ErrNoSuchBucket
 	}
@@ -91,10 +92,10 @@ func lockUpload(ctx context.Context, tx pgx.Tx, bucket, key, uploadID string, ex
 	var bucketID int64
 	var algo *string
 	err := tx.QueryRow(ctx, `
-		SELECT u.bucket_id, u.headers, u.checksum_algorithm, coalesce(u.checksum_type, ''), u.tags, u.created_at
+		SELECT u.bucket_id, u.headers, u.checksum_algorithm, coalesce(u.checksum_type, ''), u.tags, u.access_key, u.created_at
 		FROM multipart_uploads u JOIN buckets b ON b.id = u.bucket_id
 		WHERE u.upload_id = $1 AND b.name = $2 AND u.key = $3 AND u.completed_at IS NULL `+lock, uploadID, bucket, key).
-		Scan(&bucketID, &u.Headers, &algo, &u.ChecksumType, &u.Tags, &u.Initiated)
+		Scan(&bucketID, &u.Headers, &algo, &u.ChecksumType, &u.Tags, &u.AccessKey, &u.Initiated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM buckets WHERE name = $1)", bucket).Scan(&exists); err == nil && !exists {
@@ -290,7 +291,7 @@ func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID strin
 			return err
 		}
 		res.VersionID, err = addVersion(ctx, tx, objectID, versioning, &manifestID, Version{
-			Size: size, ETag: etag, Headers: u.Headers, Tags: u.Tags, PartsCount: len(list), PartSizes: sizes,
+			Size: size, ETag: etag, Headers: u.Headers, Tags: u.Tags, PartsCount: len(list), PartSizes: sizes, AccessKey: u.AccessKey,
 			ChecksumAlgorithm: res.ChecksumAlgorithm, ChecksumValue: sumValue, ChecksumType: res.ChecksumType,
 		})
 		if err != nil {

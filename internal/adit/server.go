@@ -167,7 +167,7 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 // subresources Adit does not implement yet; requests for them get 501
 // rather than being mistaken for plain object or bucket operations.
 var unsupportedSubresources = []string{
-	"cors", "encryption", "lifecycle", "logging", "notification", "object-lock", "ownershipControls",
+	"cors", "encryption", "logging", "notification", "object-lock", "ownershipControls",
 	"policy", "policyStatus", "publicAccessBlock", "replication", "requestPayment", "restore", "retention",
 	"legal-hold", "select", "torrent", "website",
 	"accelerate", "analytics", "intelligent-tiering", "inventory", "metrics", "attributes",
@@ -191,6 +191,9 @@ func (s *Server) route(req *request) error {
 	if r.Header.Get("X-Amz-Server-Side-Encryption-Customer-Algorithm") != "" {
 		req.op = "Unsupported"
 		return errf(http.StatusNotImplemented, "NotImplemented", "Server-side encryption is not supported by Lode yet.")
+	}
+	if req.bucket != "" && req.key == "" && q.Has("lifecycle") {
+		return s.lifecycle(req)
 	}
 	if req.bucket != "" && (q.Has("tagging") || q.Has("acl")) {
 		if req.key == "" {
@@ -340,6 +343,11 @@ func (s *Server) toAPIError(req *request, err error) *apiError {
 		return errPreconditionFailed
 	case errors.Is(err, ledger.ErrCopyFromDeleteMarker):
 		return errMethodNotAllowed
+	case errors.Is(err, ledger.ErrQuotaExceeded):
+		s.emit("quota.exceeded", map[string]any{"bucket": req.bucket, "key": req.key, "access_key": req.auth.AccessKey, "op": req.op})
+		return errQuotaExceeded
+	case errors.Is(err, ledger.ErrNoLifecycle):
+		return errf(http.StatusNotFound, "NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist")
 	case errors.Is(err, cluster.ErrInsufficientReplicas), errors.Is(err, cluster.ErrUnavailable):
 		s.log.Warn("storage unavailable", "op", req.op, "bucket", req.bucket, "key", req.key, "request_id", req.id, "err", err)
 		return errServiceUnavailable

@@ -48,6 +48,7 @@ type Stats struct {
 	UploadsAborted   int
 	NuggetsReclaimed int
 	NuggetsDeferred  int // unreferenced but a replica's vein could not be reached
+	BlobsDeleted     int // deferred deletes performed
 }
 
 type Worker struct {
@@ -138,6 +139,22 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 
 	if _, err := w.opts.Ledger.PurgeCompletedUploads(ctx, now.Add(-time.Hour)); err != nil {
 		return st, err
+	}
+
+	// Blobs left behind by storage-class transitions and moves.
+	due, err := w.opts.Ledger.DueDeletes(ctx, batchSize)
+	if err != nil {
+		return st, err
+	}
+	for _, loc := range due {
+		ran, err := w.opts.Ledger.RunDeferredDelete(ctx, loc, func() error { return w.opts.Veins.Delete(ctx, loc.Vein, loc.ID) })
+		if err != nil {
+			st.NuggetsDeferred++
+			continue
+		}
+		if ran {
+			st.BlobsDeleted++
+		}
 	}
 
 	cutoff := now.Add(-w.opts.Grace)

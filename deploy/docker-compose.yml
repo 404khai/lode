@@ -64,6 +64,10 @@ services:
       - ./adit.example.yaml:/etc/lode/adit.yaml:ro
     environment:
       LODE_CANARY_DOWN_AFTER: 15s
+      # Testing knobs (test/e2e/lifecycle.sh): skew the lifecycle clock.
+      LODE_STRATA_CLOCK_OFFSET: ${LODE_STRATA_CLOCK_OFFSET:-0s}
+      LODE_STRATA_INTERVAL: ${LODE_STRATA_INTERVAL:-1h}
+      LODE_STRATA_TRANSITION_DELAY: ${LODE_STRATA_TRANSITION_DELAY:-10m}
     ports: ["9000:9000", "9090:9090"]
     depends_on:
       postgres: { condition: service_healthy }
