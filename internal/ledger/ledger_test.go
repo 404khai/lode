@@ -421,3 +421,28 @@ func TestVeinsAndReplicas(t *testing.T) {
 		t.Fatalf("replica rows survived reclaim: %v", have)
 	}
 }
+
+func TestLostNuggetsAreNotRequeued(t *testing.T) {
+	l := newTestLedger(t)
+	ctx := context.Background()
+	id := nugget.Sum([]byte("gone"))
+	if err := l.EnqueueRepair(ctx, id, ReasonCorrupt, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	j, err := l.LeaseRepair(ctx, "w", time.Minute)
+	if err != nil || j == nil || j.BadVeins[0] != "v1" {
+		t.Fatalf("lease = %+v %v", j, err)
+	}
+	if err := l.EnqueueRepair(ctx, id, ReasonCorrupt, "v2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.FinishRepair(ctx, j.ID, "w", "lost", "no copy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.EnqueueRepair(ctx, id, ReasonCorrupt, "v3"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := l.RepairStats(ctx); st.Queued != 0 || st.Lost != 1 {
+		t.Fatalf("lost nugget re-queued: %+v", st)
+	}
+}

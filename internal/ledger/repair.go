@@ -37,8 +37,9 @@ type RepairJob struct {
 	Attempts int
 }
 
-// EnqueueRepair queues a repair for id unless one is already open; badVein,
-// if set, is added to the job's list of veins whose copy must be replaced.
+// EnqueueRepair queues a repair for id unless one is already open (badVein,
+// if set, is added to the open job's list of veins whose copy must be
+// replaced) or the nugget was already declared lost, which needs an operator.
 func (l *Ledger) EnqueueRepair(ctx context.Context, id nugget.ID, reason, badVein string) error {
 	bad := []string{}
 	if badVein != "" {
@@ -46,8 +47,9 @@ func (l *Ledger) EnqueueRepair(ctx context.Context, id nugget.ID, reason, badVei
 	}
 	_, err := l.pool.Exec(ctx, `
 		INSERT INTO repair_jobs (nugget, reason, bad_veins, priority)
-		VALUES ($1, $2, $3, (SELECT count(*) FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
-			WHERE r.nugget = $1 AND v.state = 'healthy'))
+		SELECT $1, $2, $3, (SELECT count(*) FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
+			WHERE r.nugget = $1 AND v.state = 'healthy')
+		WHERE NOT EXISTS (SELECT 1 FROM repair_jobs WHERE nugget = $1 AND state = 'lost')
 		ON CONFLICT (nugget) WHERE state IN ('queued', 'leased') DO UPDATE
 			SET bad_veins = (SELECT array_agg(DISTINCT b) FROM unnest(repair_jobs.bad_veins || EXCLUDED.bad_veins) b),
 			    updated_at = now()`, id[:], reason, bad)
@@ -78,7 +80,7 @@ func (l *Ledger) EnqueueUnderReplicated(ctx context.Context, limit int) (int64, 
 		CROSS JOIN LATERAL (SELECT count(*) AS cnt FROM nugget_replicas r JOIN veins v ON v.id = r.vein_id
 			WHERE r.nugget = n.id AND v.state = 'healthy') h
 		WHERE n.refs > 0 AND h.cnt < greatest(n.replication, 1)
-		  AND NOT EXISTS (SELECT 1 FROM repair_jobs j WHERE j.nugget = n.id AND j.state IN ('queued', 'leased'))
+		  AND NOT EXISTS (SELECT 1 FROM repair_jobs j WHERE j.nugget = n.id AND j.state IN ('queued', 'leased', 'lost'))
 		LIMIT $1
 		ON CONFLICT (nugget) WHERE state IN ('queued', 'leased') DO NOTHING`, limit)
 	return tag.RowsAffected(), err
