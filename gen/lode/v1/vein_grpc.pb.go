@@ -19,11 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	VeinService_PutShard_FullMethodName    = "/lode.v1.VeinService/PutShard"
-	VeinService_GetShard_FullMethodName    = "/lode.v1.VeinService/GetShard"
-	VeinService_StatShard_FullMethodName   = "/lode.v1.VeinService/StatShard"
-	VeinService_DeleteShard_FullMethodName = "/lode.v1.VeinService/DeleteShard"
-	VeinService_Status_FullMethodName      = "/lode.v1.VeinService/Status"
+	VeinService_PutShard_FullMethodName     = "/lode.v1.VeinService/PutShard"
+	VeinService_GetShard_FullMethodName     = "/lode.v1.VeinService/GetShard"
+	VeinService_StatShard_FullMethodName    = "/lode.v1.VeinService/StatShard"
+	VeinService_DeleteShard_FullMethodName  = "/lode.v1.VeinService/DeleteShard"
+	VeinService_Status_FullMethodName       = "/lode.v1.VeinService/Status"
+	VeinService_TriggerScrub_FullMethodName = "/lode.v1.VeinService/TriggerScrub"
 )
 
 // VeinServiceClient is the client API for VeinService service.
@@ -45,6 +46,9 @@ type VeinServiceClient interface {
 	DeleteShard(ctx context.Context, in *DeleteShardRequest, opts ...grpc.CallOption) (*DeleteShardResponse, error)
 	// Status reports the vein's identity and usage.
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
+	// TriggerScrub starts an Assay pass now instead of waiting for the next
+	// scheduled one. started is false if a pass is already running.
+	TriggerScrub(ctx context.Context, in *TriggerScrubRequest, opts ...grpc.CallOption) (*TriggerScrubResponse, error)
 }
 
 type veinServiceClient struct {
@@ -117,6 +121,16 @@ func (c *veinServiceClient) Status(ctx context.Context, in *StatusRequest, opts 
 	return out, nil
 }
 
+func (c *veinServiceClient) TriggerScrub(ctx context.Context, in *TriggerScrubRequest, opts ...grpc.CallOption) (*TriggerScrubResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TriggerScrubResponse)
+	err := c.cc.Invoke(ctx, VeinService_TriggerScrub_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VeinServiceServer is the server API for VeinService service.
 // All implementations must embed UnimplementedVeinServiceServer
 // for forward compatibility.
@@ -136,6 +150,9 @@ type VeinServiceServer interface {
 	DeleteShard(context.Context, *DeleteShardRequest) (*DeleteShardResponse, error)
 	// Status reports the vein's identity and usage.
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
+	// TriggerScrub starts an Assay pass now instead of waiting for the next
+	// scheduled one. started is false if a pass is already running.
+	TriggerScrub(context.Context, *TriggerScrubRequest) (*TriggerScrubResponse, error)
 	mustEmbedUnimplementedVeinServiceServer()
 }
 
@@ -160,6 +177,9 @@ func (UnimplementedVeinServiceServer) DeleteShard(context.Context, *DeleteShardR
 }
 func (UnimplementedVeinServiceServer) Status(context.Context, *StatusRequest) (*StatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Status not implemented")
+}
+func (UnimplementedVeinServiceServer) TriggerScrub(context.Context, *TriggerScrubRequest) (*TriggerScrubResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerScrub not implemented")
 }
 func (UnimplementedVeinServiceServer) mustEmbedUnimplementedVeinServiceServer() {}
 func (UnimplementedVeinServiceServer) testEmbeddedByValue()                     {}
@@ -254,6 +274,24 @@ func _VeinService_Status_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VeinService_TriggerScrub_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerScrubRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VeinServiceServer).TriggerScrub(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VeinService_TriggerScrub_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VeinServiceServer).TriggerScrub(ctx, req.(*TriggerScrubRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VeinService_ServiceDesc is the grpc.ServiceDesc for VeinService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -272,6 +310,10 @@ var VeinService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Status",
 			Handler:    _VeinService_Status_Handler,
+		},
+		{
+			MethodName: "TriggerScrub",
+			Handler:    _VeinService_TriggerScrub_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

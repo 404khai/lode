@@ -189,6 +189,15 @@ func (c *Canary) Tick(ctx context.Context) error {
 	now := c.opts.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Heartbeats travel through the Ledger. When most veins go quiet at the
+	// same moment the likely culprit is that shared path (or this process),
+	// not the veins, so new suspicions are held until it recovers.
+	type eval struct {
+		phi    float64
+		silent time.Duration
+	}
+	evals := make(map[string]eval, len(veins))
+	healthy, wouldSuspect := 0, 0
 	for _, v := range veins {
 		d := c.detectors[v.ID]
 		if d == nil {
@@ -196,16 +205,29 @@ func (c *Canary) Tick(ctx context.Context) error {
 			c.detectors[v.ID] = d
 		}
 		d.observe(v.LastHeartbeat)
-		phi := d.phi(now, c.opts.ExpectedInterval, c.opts.MinStdDev)
-		silent := now.Sub(v.LastHeartbeat)
+		e := eval{d.phi(now, c.opts.ExpectedInterval, c.opts.MinStdDev), now.Sub(v.LastHeartbeat)}
+		evals[v.ID] = e
+		if v.State == ledger.VeinHealthy {
+			healthy++
+			if c.suspicious(e.phi, e.silent) {
+				wouldSuspect++
+			}
+		}
+	}
+	correlated := wouldSuspect >= 2 && wouldSuspect*2 > healthy
+	if correlated {
+		c.log.Warn("heartbeats delayed across the cluster; holding suspicion", "veins", healthy, "silent", wouldSuspect)
+	}
+	for _, v := range veins {
+		phi, silent := evals[v.ID].phi, evals[v.ID].silent
 		c.phiGauge.WithLabelValues(v.ID).Set(math.Min(phi, 1000))
 
 		next := v.State
 		switch v.State {
 		case ledger.VeinHealthy:
-			if silent >= c.opts.DownAfter {
+			if silent >= c.opts.DownAfter && !correlated {
 				next = ledger.VeinDown
-			} else if phi >= c.opts.SuspectPhi {
+			} else if c.suspicious(phi, silent) && !correlated {
 				next = ledger.VeinSuspect
 			}
 		case ledger.VeinSuspect:
@@ -252,6 +274,12 @@ func (c *Canary) Tick(ctx context.Context) error {
 	c.queued.Set(float64(st.Queued + st.Leased))
 	c.lost.Set(float64(st.Lost))
 	return nil
+}
+
+// suspicious reports whether a healthy vein should stop taking writes: phi
+// over the threshold and silent for at least three heartbeat intervals.
+func (c *Canary) suspicious(phi float64, silent time.Duration) bool {
+	return phi >= c.opts.SuspectPhi && silent >= 3*c.opts.ExpectedInterval
 }
 
 func (c *Canary) transition(ctx context.Context, v ledger.VeinInfo, to string, phi float64, silent time.Duration) error {

@@ -54,6 +54,24 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
   than silently stored in plaintext), bucket policies, CORS, object lock, virtual-hosted addressing.
   Compatibility is tracked in `test/s3compat/tests.txt`.
 
+## Agents (MCP)
+
+Foreman exposes the cluster to agents over MCP. Read-only by default; `-allow-write` adds
+`drain_vein`, `trigger_scrub`, `set_quota`, `put_lifecycle_rule` and `retry_repair` (annotated
+destructive). Every tool returns structured JSON and a one-line summary.
+
+```bash
+# stdio, e.g. for Claude Code:
+claude mcp add lode -- ./bin/lode-foreman -config deploy/adit.example.yaml
+# or streamable HTTP (compose runs this on :9100):
+./bin/lode-foreman -http :9100   # Authorization: Bearer <access-key>:<secret-key>
+```
+
+Tools: `cluster_status`, `list_veins`, `vein_detail`, `disk_health`, `locate_object`,
+`objects_at_risk`, `list_repairs`, `explain_repair`, `bucket_usage`, `list_lifecycle_rules`,
+`simulate_placement`. Resources: `lode://cluster`, `lode://repairs`, `lode://veins/{id}`,
+`lode://buckets/{name}`, `lode://objects/{bucket}/{key}`.
+
 ## Development
 
 ```bash

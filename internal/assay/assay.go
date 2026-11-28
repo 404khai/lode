@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,6 +32,8 @@ type Options struct {
 }
 
 type Assay struct {
+	wake           chan struct{}
+	running        atomic.Bool
 	opts           Options
 	log            *slog.Logger
 	passes, found  prometheus.Counter
@@ -53,6 +56,7 @@ func New(opts Options) *Assay {
 		return f.NewCounter(prometheus.CounterOpts{Namespace: "lode", Subsystem: "assay", Name: name, Help: help})
 	}
 	return &Assay{
+		wake: make(chan struct{}, 1),
 		opts: opts, log: opts.Logger,
 		passes:  c("passes_total", "Completed scrub passes."),
 		found:   c("corrupt_found_total", "Corrupt copies found and queued for repair."),
@@ -72,12 +76,28 @@ func (a *Assay) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(a.opts.Pause):
+		case <-a.wake:
 		}
 	}
 }
 
+// Trigger asks Run to start a pass now. It reports false if a pass is
+// already running (the request is then a no-op).
+func (a *Assay) Trigger() bool {
+	if a.running.Load() {
+		return false
+	}
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
 // Pass scrubs every nugget once and returns how many were corrupt.
 func (a *Assay) Pass(ctx context.Context) (corrupt int, err error) {
+	a.running.Store(true)
+	defer a.running.Store(false)
 	scanned, err := a.opts.Store.Scrub(ctx, a.opts.BytesPerSecond, func(id nugget.ID) {
 		corrupt++
 		a.found.Inc()

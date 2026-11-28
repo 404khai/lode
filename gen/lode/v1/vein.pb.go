@@ -477,6 +477,86 @@ func (x *StatusResponse) GetUsedBytes() int64 {
 	return 0
 }
 
+type TriggerScrubRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TriggerScrubRequest) Reset() {
+	*x = TriggerScrubRequest{}
+	mi := &file_lode_v1_vein_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TriggerScrubRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TriggerScrubRequest) ProtoMessage() {}
+
+func (x *TriggerScrubRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lode_v1_vein_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TriggerScrubRequest.ProtoReflect.Descriptor instead.
+func (*TriggerScrubRequest) Descriptor() ([]byte, []int) {
+	return file_lode_v1_vein_proto_rawDescGZIP(), []int{10}
+}
+
+type TriggerScrubResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Started       bool                   `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TriggerScrubResponse) Reset() {
+	*x = TriggerScrubResponse{}
+	mi := &file_lode_v1_vein_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TriggerScrubResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TriggerScrubResponse) ProtoMessage() {}
+
+func (x *TriggerScrubResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_lode_v1_vein_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TriggerScrubResponse.ProtoReflect.Descriptor instead.
+func (*TriggerScrubResponse) Descriptor() ([]byte, []int) {
+	return file_lode_v1_vein_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *TriggerScrubResponse) GetStarted() bool {
+	if x != nil {
+		return x.Started
+	}
+	return false
+}
+
 var File_lode_v1_vein_proto protoreflect.FileDescriptor
 
 const file_lode_v1_vein_proto_rawDesc = "" +
@@ -504,13 +584,17 @@ const file_lode_v1_vein_proto_rawDesc = "" +
 	"\avein_id\x18\x01 \x01(\tR\x06veinId\x12%\n" +
 	"\x0ecapacity_bytes\x18\x02 \x01(\x03R\rcapacityBytes\x12\x1d\n" +
 	"\n" +
-	"used_bytes\x18\x03 \x01(\x03R\tusedBytes2\xdc\x02\n" +
+	"used_bytes\x18\x03 \x01(\x03R\tusedBytes\"\x15\n" +
+	"\x13TriggerScrubRequest\"0\n" +
+	"\x14TriggerScrubResponse\x12\x18\n" +
+	"\astarted\x18\x01 \x01(\bR\astarted2\xa9\x03\n" +
 	"\vVeinService\x12A\n" +
 	"\bPutShard\x12\x18.lode.v1.PutShardRequest\x1a\x19.lode.v1.PutShardResponse(\x01\x12A\n" +
 	"\bGetShard\x12\x18.lode.v1.GetShardRequest\x1a\x19.lode.v1.GetShardResponse0\x01\x12B\n" +
 	"\tStatShard\x12\x19.lode.v1.StatShardRequest\x1a\x1a.lode.v1.StatShardResponse\x12H\n" +
 	"\vDeleteShard\x12\x1b.lode.v1.DeleteShardRequest\x1a\x1c.lode.v1.DeleteShardResponse\x129\n" +
-	"\x06Status\x12\x16.lode.v1.StatusRequest\x1a\x17.lode.v1.StatusResponseB,Z*github.com/404khai/lode/gen/lode/v1;lodev1b\x06proto3"
+	"\x06Status\x12\x16.lode.v1.StatusRequest\x1a\x17.lode.v1.StatusResponse\x12K\n" +
+	"\fTriggerScrub\x12\x1c.lode.v1.TriggerScrubRequest\x1a\x1d.lode.v1.TriggerScrubResponseB,Z*github.com/404khai/lode/gen/lode/v1;lodev1b\x06proto3"
 
 var (
 	file_lode_v1_vein_proto_rawDescOnce sync.Once
@@ -524,35 +608,39 @@ func file_lode_v1_vein_proto_rawDescGZIP() []byte {
 	return file_lode_v1_vein_proto_rawDescData
 }
 
-var file_lode_v1_vein_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_lode_v1_vein_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_lode_v1_vein_proto_goTypes = []any{
-	(*PutShardRequest)(nil),     // 0: lode.v1.PutShardRequest
-	(*PutShardResponse)(nil),    // 1: lode.v1.PutShardResponse
-	(*GetShardRequest)(nil),     // 2: lode.v1.GetShardRequest
-	(*GetShardResponse)(nil),    // 3: lode.v1.GetShardResponse
-	(*StatShardRequest)(nil),    // 4: lode.v1.StatShardRequest
-	(*StatShardResponse)(nil),   // 5: lode.v1.StatShardResponse
-	(*DeleteShardRequest)(nil),  // 6: lode.v1.DeleteShardRequest
-	(*DeleteShardResponse)(nil), // 7: lode.v1.DeleteShardResponse
-	(*StatusRequest)(nil),       // 8: lode.v1.StatusRequest
-	(*StatusResponse)(nil),      // 9: lode.v1.StatusResponse
+	(*PutShardRequest)(nil),      // 0: lode.v1.PutShardRequest
+	(*PutShardResponse)(nil),     // 1: lode.v1.PutShardResponse
+	(*GetShardRequest)(nil),      // 2: lode.v1.GetShardRequest
+	(*GetShardResponse)(nil),     // 3: lode.v1.GetShardResponse
+	(*StatShardRequest)(nil),     // 4: lode.v1.StatShardRequest
+	(*StatShardResponse)(nil),    // 5: lode.v1.StatShardResponse
+	(*DeleteShardRequest)(nil),   // 6: lode.v1.DeleteShardRequest
+	(*DeleteShardResponse)(nil),  // 7: lode.v1.DeleteShardResponse
+	(*StatusRequest)(nil),        // 8: lode.v1.StatusRequest
+	(*StatusResponse)(nil),       // 9: lode.v1.StatusResponse
+	(*TriggerScrubRequest)(nil),  // 10: lode.v1.TriggerScrubRequest
+	(*TriggerScrubResponse)(nil), // 11: lode.v1.TriggerScrubResponse
 }
 var file_lode_v1_vein_proto_depIdxs = []int32{
-	0, // 0: lode.v1.VeinService.PutShard:input_type -> lode.v1.PutShardRequest
-	2, // 1: lode.v1.VeinService.GetShard:input_type -> lode.v1.GetShardRequest
-	4, // 2: lode.v1.VeinService.StatShard:input_type -> lode.v1.StatShardRequest
-	6, // 3: lode.v1.VeinService.DeleteShard:input_type -> lode.v1.DeleteShardRequest
-	8, // 4: lode.v1.VeinService.Status:input_type -> lode.v1.StatusRequest
-	1, // 5: lode.v1.VeinService.PutShard:output_type -> lode.v1.PutShardResponse
-	3, // 6: lode.v1.VeinService.GetShard:output_type -> lode.v1.GetShardResponse
-	5, // 7: lode.v1.VeinService.StatShard:output_type -> lode.v1.StatShardResponse
-	7, // 8: lode.v1.VeinService.DeleteShard:output_type -> lode.v1.DeleteShardResponse
-	9, // 9: lode.v1.VeinService.Status:output_type -> lode.v1.StatusResponse
-	5, // [5:10] is the sub-list for method output_type
-	0, // [0:5] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: lode.v1.VeinService.PutShard:input_type -> lode.v1.PutShardRequest
+	2,  // 1: lode.v1.VeinService.GetShard:input_type -> lode.v1.GetShardRequest
+	4,  // 2: lode.v1.VeinService.StatShard:input_type -> lode.v1.StatShardRequest
+	6,  // 3: lode.v1.VeinService.DeleteShard:input_type -> lode.v1.DeleteShardRequest
+	8,  // 4: lode.v1.VeinService.Status:input_type -> lode.v1.StatusRequest
+	10, // 5: lode.v1.VeinService.TriggerScrub:input_type -> lode.v1.TriggerScrubRequest
+	1,  // 6: lode.v1.VeinService.PutShard:output_type -> lode.v1.PutShardResponse
+	3,  // 7: lode.v1.VeinService.GetShard:output_type -> lode.v1.GetShardResponse
+	5,  // 8: lode.v1.VeinService.StatShard:output_type -> lode.v1.StatShardResponse
+	7,  // 9: lode.v1.VeinService.DeleteShard:output_type -> lode.v1.DeleteShardResponse
+	9,  // 10: lode.v1.VeinService.Status:output_type -> lode.v1.StatusResponse
+	11, // 11: lode.v1.VeinService.TriggerScrub:output_type -> lode.v1.TriggerScrubResponse
+	6,  // [6:12] is the sub-list for method output_type
+	0,  // [0:6] is the sub-list for method input_type
+	0,  // [0:0] is the sub-list for extension type_name
+	0,  // [0:0] is the sub-list for extension extendee
+	0,  // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_lode_v1_vein_proto_init() }
@@ -566,7 +654,7 @@ func file_lode_v1_vein_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lode_v1_vein_proto_rawDesc), len(file_lode_v1_vein_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

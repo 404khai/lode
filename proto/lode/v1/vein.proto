@@ -19,6 +19,9 @@ service VeinService {
   rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
   // Status reports the vein's identity and usage.
   rpc Status(StatusRequest) returns (StatusResponse);
+  // TriggerScrub starts an Assay pass now instead of waiting for the next
+  // scheduled one. started is false if a pass is already running.
+  rpc TriggerScrub(TriggerScrubRequest) returns (TriggerScrubResponse);
 }
 
 message PutShardRequest {
@@ -59,4 +62,10 @@ message StatusResponse {
   string vein_id = 1;
   int64 capacity_bytes = 2;
   int64 used_bytes = 3;
+}
+
+message TriggerScrubRequest {}
+
+message TriggerScrubResponse {
+  bool started = 1;
 }

@@ -423,6 +423,20 @@ func (c *Client) getOnce(ctx context.Context, veinID string, id nugget.ID, lengt
 	return buf, nil
 }
 
+// TriggerScrub asks a vein to start an Assay pass now.
+func (c *Client) TriggerScrub(ctx context.Context, veinID string) (started bool, err error) {
+	m, err := c.member(veinID)
+	if err != nil {
+		return false, err
+	}
+	start := time.Now()
+	defer func() { c.observe(ctx, veinID, "TriggerScrub", start, err) }()
+	ctx, cancel := context.WithTimeout(ctx, c.opts.RPCTimeout)
+	defer cancel()
+	resp, err := m.client.TriggerScrub(ctx, &lodev1.TriggerScrubRequest{})
+	return resp.GetStarted(), err
+}
+
 // Delete removes id from one vein.
 func (c *Client) Delete(ctx context.Context, veinID string, id nugget.ID) (err error) {
 	m, err := c.member(veinID)
@@ -491,7 +505,7 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 	switch total := held + len(written); {
 	case total < quorum:
 		c.writes.WithLabelValues("failed").Inc()
-		return written, fmt.Errorf("%w: %d of %d replicas stored (need %d): %w", ErrInsufficientReplicas, total, replicas, quorum, errors.Join(errs...))
+		return written, fmt.Errorf("%w: %d of %d replicas stored (need %d)%s", ErrInsufficientReplicas, total, replicas, quorum, joinErrs(errs))
 	case total < replicas:
 		c.writes.WithLabelValues("degraded").Inc()
 		c.opts.Events.Publish(events.Event{Type: "nugget.under_replicated", Component: "adit",
@@ -503,6 +517,15 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 		c.writes.WithLabelValues("full").Inc()
 	}
 	return written, nil
+}
+
+// joinErrs renders underlying errors as ": a; b", or "" when there are none
+// (e.g. no vein was available to try).
+func joinErrs(errs []error) string {
+	if len(errs) == 0 {
+		return " (no vein available)"
+	}
+	return ": " + errors.Join(errs...).Error()
 }
 
 // Read returns ref's bytes: from the best replica, or for an erasure-coded

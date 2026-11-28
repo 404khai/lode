@@ -91,7 +91,7 @@ func (c *Client) StoreEC(ctx context.Context, id nugget.ID, data []byte, existin
 	switch {
 	case total < quorum:
 		c.writes.WithLabelValues("failed").Inc()
-		return written, fmt.Errorf("%w: %d of %d shards stored (need %d): %w", ErrInsufficientReplicas, total, k+m, quorum, errors.Join(errs...))
+		return written, fmt.Errorf("%w: %d of %d shards stored (need %d)%s", ErrInsufficientReplicas, total, k+m, quorum, joinErrs(errs))
 	case total < k+m:
 		c.writes.WithLabelValues("degraded").Inc()
 		c.opts.Events.Publish(events.Event{Type: "nugget.under_replicated", Component: "adit",

@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -s -w -X github.com/404khai/lode/internal/version.Version=$(VERSION) -X github.com/404khai/lode/internal/version.Commit=$(COMMIT)
-BINS    := lode lode-adit lode-vein
+BINS    := lode lode-adit lode-vein lode-foreman
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
 .PHONY: build test lint proto up down e2e corruption dedup replication erasure lifecycle s3compat chaos

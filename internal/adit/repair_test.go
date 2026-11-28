@@ -241,3 +241,42 @@ func TestCanaryDetectsSilenceAndRecovery(t *testing.T) {
 		t.Fatalf("v2 did not recover: %s", state("v2"))
 	}
 }
+
+// When every vein's heartbeat stalls at once (Ledger slowness), Canary must
+// not take the whole cluster out of service.
+func TestCanaryHoldsSuspicionOnClusterWideSilence(t *testing.T) {
+	h := newClusterHarness(t, 3, 3)
+	ctx := context.Background()
+	now := time.Now()
+	c := canary.New(canary.Options{Ledger: h.ledger, Now: func() time.Time { return now }, DownAfter: time.Minute})
+	beat := func(ids ...string) {
+		for _, id := range ids {
+			_, _ = h.ledger.Pool().Exec(ctx, "UPDATE veins SET last_heartbeat = $2 WHERE id = $1", id, now)
+		}
+	}
+	for i := 0; i < 15; i++ {
+		now = now.Add(2 * time.Second)
+		beat("v1", "v2", "v3")
+		_ = c.Tick(ctx)
+	}
+	now = now.Add(8 * time.Second) // everyone silent
+	if err := c.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vs, _ := h.ledger.ListVeins(ctx)
+	for _, v := range vs {
+		if v.State != ledger.VeinHealthy {
+			t.Fatalf("%s marked %s during a cluster-wide stall", v.ID, v.State)
+		}
+	}
+	// A single silent vein is still suspected.
+	for i := 0; i < 4; i++ {
+		now = now.Add(2 * time.Second)
+		beat("v1", "v2")
+		_ = c.Tick(ctx)
+	}
+	vs, _ = h.ledger.ListVeins(ctx)
+	if vs[2].State != ledger.VeinSuspect {
+		t.Fatalf("lone silent v3 is %s, want suspect", vs[2].State)
+	}
+}
