@@ -26,11 +26,12 @@ func (l *Ledger) ReclaimCandidates(ctx context.Context, cutoff time.Time, limit 
 }
 
 // ReclaimNugget deletes id if it is still unreferenced and untouched since
-// cutoff. The nugget row stays locked while remove runs and is deleted only
-// after remove succeeds, so a concurrent upload touching the same nugget
-// waits, then re-creates the row and rewrites the bytes. It reports whether
-// the nugget was reclaimed.
-func (l *Ledger) ReclaimNugget(ctx context.Context, id nugget.ID, cutoff time.Time, remove func() error) (bool, error) {
+// cutoff. The nugget row stays locked while remove deletes the replicas from
+// the given veins, and is deleted (with its replica rows) only after remove
+// succeeds, so a concurrent upload touching the same nugget waits, then
+// re-creates the row and rewrites the bytes. It reports whether the nugget
+// was reclaimed.
+func (l *Ledger) ReclaimNugget(ctx context.Context, id nugget.ID, cutoff time.Time, remove func(veins []string) error) (bool, error) {
 	reclaimed := false
 	err := pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
 		var refs int64
@@ -45,7 +46,15 @@ func (l *Ledger) ReclaimNugget(ctx context.Context, id nugget.ID, cutoff time.Ti
 		if refs != 0 || !touched.Before(cutoff) {
 			return nil
 		}
-		if err := remove(); err != nil {
+		rows, err := tx.Query(ctx, "SELECT vein_id FROM nugget_replicas WHERE nugget = $1", id[:])
+		if err != nil {
+			return err
+		}
+		veins, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if err := remove(veins); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, "DELETE FROM nuggets WHERE id = $1", id[:]); err != nil {

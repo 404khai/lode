@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package lode.v1;
+
+option go_package = "github.com/404khai/lode/gen/lode/v1;lodev1";
+
+// VeinService is served by every storage node (vein). Shards are
+// content-addressed: id is the BLAKE3-256 hash of the shard's bytes.
+service VeinService {
+  // PutShard streams one shard. The first message carries id and length.
+  // Storing a shard that is already present succeeds without rewriting it.
+  rpc PutShard(stream PutShardRequest) returns (PutShardResponse);
+  // GetShard streams a shard's bytes after the vein has verified them.
+  rpc GetShard(GetShardRequest) returns (stream GetShardResponse);
+  // StatShard reports whether a shard is present.
+  rpc StatShard(StatShardRequest) returns (StatShardResponse);
+  // DeleteShard removes a shard. Only Tailings calls it, after the Ledger
+  // confirms the shard is unreferenced.
+  rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
+  // Status reports the vein's identity and usage.
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message PutShardRequest {
+  bytes id = 1;
+  int64 length = 2;
+  bytes data = 3;
+}
+
+message PutShardResponse {
+  bool deduplicated = 1;
+}
+
+message GetShardRequest {
+  bytes id = 1;
+}
+
+message GetShardResponse {
+  bytes data = 1;
+}
+
+message StatShardRequest {
+  bytes id = 1;
+}
+
+message StatShardResponse {
+  bool exists = 1;
+}
+
+message DeleteShardRequest {
+  bytes id = 1;
+}
+
+message DeleteShardResponse {}
+
+message StatusRequest {}
+
+message StatusResponse {
+  string vein_id = 1;
+  int64 capacity_bytes = 2;
+  int64 used_bytes = 3;
+}

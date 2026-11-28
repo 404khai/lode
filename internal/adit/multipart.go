@@ -57,7 +57,11 @@ func (s *Server) uploadPart(req *request, uploadID string) error {
 	if _, err := s.ledger.GetUpload(req.r.Context(), req.bucket, req.key, uploadID); err != nil {
 		return err
 	}
-	in, err := s.ingest(req, maxPutSize)
+	bucket, err := s.ledger.HeadBucket(req.r.Context(), req.bucket)
+	if err != nil {
+		return err
+	}
+	in, err := s.ingest(req, maxPutSize, bucket)
 	if err != nil {
 		return err
 	}

@@ -151,14 +151,17 @@ func TestTailingsReclaimsOnlyUnreferenced(t *testing.T) {
 	h.expect(h.do("PUT", "/gcb/drop", drop, nil), 200, "")
 	h.expect(h.do("DELETE", "/gcb/drop", nil, nil), 204, "")
 
-	w := tailings.New(tailings.Options{Ledger: h.ledger, Vein: h.vein, Grace: time.Hour})
+	w := tailings.New(tailings.Options{Ledger: h.ledger, Veins: h.cluster, Grace: time.Hour})
 	if st, err := w.RunOnce(context.Background()); err != nil || st.NuggetsReclaimed != 0 {
 		t.Fatalf("pass inside grace window: %+v %v", st, err)
 	}
-	w = tailings.New(tailings.Options{Ledger: h.ledger, Vein: h.vein, Grace: -time.Minute, CompactRatio: 0.01})
+	w = tailings.New(tailings.Options{Ledger: h.ledger, Veins: h.cluster, Grace: -time.Minute})
 	st, err := w.RunOnce(context.Background())
 	if err != nil || st.NuggetsReclaimed != 1 {
 		t.Fatalf("pass: %+v %v", st, err)
+	}
+	if _, err := h.vein.Compact(0.01); err != nil {
+		t.Fatal(err)
 	}
 	if b := h.expect(h.do("GET", "/gcb/keep", nil, nil), 200, ""); !bytes.Equal(b, keep) {
 		t.Fatal("live object damaged by Tailings")

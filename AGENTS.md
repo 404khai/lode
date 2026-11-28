@@ -97,10 +97,11 @@ make build            # all binaries
 make test             # unit tests (go test ./... -race); set LODE_TEST_DSN=postgres://... to run Ledger/Adit integration tests
 make lint             # golangci-lint + buf lint
 make proto            # regenerate gRPC code (buf generate)
-make up               # docker compose: postgres + 1 adit + 4 veins + foreman + lantern
+make up               # docker compose: postgres + 1 adit + 4 veins (foreman and lantern join in later phases)
 make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
 make corruption       # corrupts a nugget on the compose vein and checks it is never served
 make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
+make replication      # kills a vein mid-upload, then reads with each vein down (VEIN_STOP/VEIN_START with __N__ override the compose commands)
 make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against an Adit on :9000 (see test/s3compat/adit.yaml)
 make chaos            # kills/partitions veins while e2e runs
 ```
@@ -152,7 +153,7 @@ phase's exit criteria pass in CI.
 - gRPC `VeinService` (streaming PutShard/GetShard/Stat/Delete); vein registration in Ledger.
 - Survey v1: rendezvous (HRW) hashing over veins, failure-domain aware (`zone`, `host`, `disk` labels).
 - Replication factor per bucket (default 3), write quorum `W`, read from fastest healthy replica.
-- **Exit:** 4-vein cluster; kill one vein mid-upload and the upload still succeeds; reads succeed with any one vein down.
+- **Exit:** 4-vein cluster; kill one vein mid-upload and the upload still succeeds; reads succeed with any one vein down. ✅
 
 ### Phase 4 — Failure detection and repair
 - Canary: heartbeats, phi-accrual detector, disk SMART/IO-error reporting, states `healthy/suspect/down/draining`.

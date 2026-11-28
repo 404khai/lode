@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,7 +25,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
 
+	lodev1 "github.com/404khai/lode/gen/lode/v1"
+	"github.com/404khai/lode/internal/cluster"
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/nugget"
 	"github.com/404khai/lode/internal/vein"
@@ -36,14 +40,46 @@ const (
 )
 
 type harness struct {
-	t      *testing.T
-	ts     *httptest.Server
-	vein   *vein.Store
-	ledger *ledger.Ledger
-	dir    string
+	t       *testing.T
+	ts      *httptest.Server
+	vein    *vein.Store // the first vein
+	veins   []*testVein
+	cluster *cluster.Client
+	ledger  *ledger.Ledger
+	dir     string // the first vein's data directory
+}
+
+// testVein is an in-process vein served over real gRPC on localhost.
+type testVein struct {
+	id    string
+	dir   string
+	store *vein.Store
+	gs    *grpc.Server
+	addr  string
+}
+
+func (v *testVein) stop() { v.gs.Stop() }
+
+// restart serves the same store again on the same address.
+func (v *testVein) restart(t *testing.T) {
+	t.Helper()
+	lis, err := net.Listen("tcp", v.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.gs = grpc.NewServer()
+	lodev1.RegisterVeinServiceServer(v.gs, vein.NewServer(v.store, v.id))
+	go func() { _ = v.gs.Serve(lis) }()
 }
 
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newClusterHarness(t, 1, 1)
+}
+
+// newClusterHarness starts n veins (alternating zones a/b) and an Adit
+// writing `replication` copies of each nugget.
+func newClusterHarness(t *testing.T, n, replication int) *harness {
 	t.Helper()
 	dsn := os.Getenv("LODE_TEST_DSN")
 	if dsn == "" {
@@ -67,29 +103,53 @@ func newHarness(t *testing.T) *harness {
 	if err := ledger.Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
 	reg := prometheus.NewRegistry()
-	store, err := vein.Open(vein.Options{Dir: dir, Registerer: reg})
-	if err != nil {
+	led := ledger.New(pool)
+	var veins []*testVein
+	for i := range n {
+		dir := t.TempDir()
+		store, err := vein.Open(vein.Options{Dir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := &testVein{id: fmt.Sprintf("v%d", i+1), dir: dir, store: store, addr: lis.Addr().String()}
+		v.gs = grpc.NewServer()
+		lodev1.RegisterVeinServiceServer(v.gs, vein.NewServer(store, v.id))
+		go func() { _ = v.gs.Serve(lis) }()
+		if err := led.RegisterVein(ctx, ledger.VeinInfo{ID: v.id, Addr: v.addr, Zone: []string{"a", "b"}[i%2], Host: v.id}); err != nil {
+			t.Fatal(err)
+		}
+		veins = append(veins, v)
+	}
+	cl := cluster.New(cluster.Options{Ledger: led, Registerer: reg, Logger: testLogger(), StaleAfter: time.Hour, Backoff: 200 * time.Millisecond, RPCTimeout: 5 * time.Second})
+	if err := cl.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	led := ledger.New(pool)
 	srv := New(Options{
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:      testLogger(),
 		Registerer:  reg,
 		Ledger:      led,
-		Vein:        store,
+		Cluster:     cl,
+		Replication: replication,
 		Credentials: map[string]string{testAK: testSK},
 	})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
-		_ = store.Close()
+		cl.Close()
+		for _, v := range veins {
+			v.gs.Stop()
+			_ = v.store.Close()
+		}
 		pool.Close()
 		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close()
 	})
-	return &harness{t: t, ts: ts, vein: store, ledger: led, dir: dir}
+	return &harness{t: t, ts: ts, vein: veins[0].store, veins: veins, cluster: cl, ledger: led, dir: veins[0].dir}
 }
 
 // sign adds a SigV4 Authorization header. payloadHash defaults to the body's SHA-256.
@@ -132,6 +192,14 @@ func (h *harness) do(method, path string, body []byte, hdr map[string]string) *h
 		h.t.Fatal(err)
 	}
 	return resp
+}
+
+// testLogger discards logs unless LODE_TEST_LOG is set.
+func testLogger() *slog.Logger {
+	if os.Getenv("LODE_TEST_LOG") != "" {
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func randomBytes(n int) []byte {

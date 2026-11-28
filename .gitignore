@@ -1,5 +1,4 @@
 /bin/
-/gen/
 *.test
 coverage.out
 .DS_Store

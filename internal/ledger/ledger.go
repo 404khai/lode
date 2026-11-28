@@ -84,15 +84,17 @@ const (
 )
 
 type Bucket struct {
-	Name       string
-	CreatedAt  time.Time
-	Versioning string // "", Enabled or Suspended
+	Name        string
+	CreatedAt   time.Time
+	Versioning  string // "", Enabled or Suspended
+	Replication int    // replicas per nugget; 0 = cluster default
 }
 
 // NuggetRef is one entry of a manifest.
 type NuggetRef struct {
-	ID     nugget.ID
-	Length int64
+	ID       nugget.ID
+	Length   int64
+	Replicas []string // veins holding a copy, filled when reading manifests
 }
 
 // Version is the metadata of one object version.
@@ -152,8 +154,8 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-func (l *Ledger) CreateBucket(ctx context.Context, name string) error {
-	_, err := l.pool.Exec(ctx, "INSERT INTO buckets (name) VALUES ($1)", name)
+func (l *Ledger) CreateBucket(ctx context.Context, name string, replication int) error {
+	_, err := l.pool.Exec(ctx, "INSERT INTO buckets (name, replication) VALUES ($1, $2)", name, replication)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == errUniqueViolation {
 		return ErrBucketExists
@@ -163,7 +165,8 @@ func (l *Ledger) CreateBucket(ctx context.Context, name string) error {
 
 func (l *Ledger) HeadBucket(ctx context.Context, name string) (Bucket, error) {
 	b := Bucket{Name: name}
-	err := l.pool.QueryRow(ctx, "SELECT created_at, versioning FROM buckets WHERE name = $1", name).Scan(&b.CreatedAt, &b.Versioning)
+	err := l.pool.QueryRow(ctx, "SELECT created_at, versioning, replication FROM buckets WHERE name = $1", name).
+		Scan(&b.CreatedAt, &b.Versioning, &b.Replication)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrNoSuchBucket
 	}
@@ -235,24 +238,25 @@ func lockBucket(ctx context.Context, tx pgx.Tx, name string) (id int64, versioni
 	return id, versioning, err
 }
 
-// TouchNuggets records that an upload is about to write these nuggets, so
-// Tailings will not reclaim them during the grace window. Callers must touch
-// a nugget before writing it to a vein.
-func (l *Ledger) TouchNuggets(ctx context.Context, refs []NuggetRef) error {
-	if len(refs) == 0 {
-		return nil
-	}
-	ids := make([][]byte, len(refs))
-	lens := make([]int64, len(refs))
-	for i, r := range refs {
-		ids[i] = r.ID[:]
-		lens[i] = r.Length
-	}
-	_, err := l.pool.Exec(ctx, `
-		INSERT INTO nuggets (id, length, refs, last_touched)
-		SELECT id, len, 0, now() FROM unnest($1::bytea[], $2::bigint[]) AS t(id, len)
-		ON CONFLICT (id) DO UPDATE SET last_touched = now()`, ids, lens)
-	return err
+// TouchNugget records that an upload is about to write ref, so Tailings will
+// not reclaim it during the grace window, and returns the veins that already
+// hold it. Callers must touch a nugget before writing it to any vein.
+func (l *Ledger) TouchNugget(ctx context.Context, ref NuggetRef) ([]string, error) {
+	var replicas []string
+	err := pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO nuggets (id, length, refs, last_touched) VALUES ($1, $2, 0, now())
+			ON CONFLICT (id) DO UPDATE SET last_touched = now()`, ref.ID[:], ref.Length); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, "SELECT vein_id FROM nugget_replicas WHERE nugget = $1 ORDER BY vein_id", ref.ID[:])
+		if err != nil {
+			return err
+		}
+		replicas, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	return replicas, err
 }
 
 // insertManifest stores a manifest and adds one reference per entry.
@@ -293,14 +297,18 @@ func dropManifest(ctx context.Context, tx pgx.Tx, id int64) error {
 }
 
 func loadManifest(ctx context.Context, tx pgx.Tx, id int64) ([]NuggetRef, error) {
-	rows, err := tx.Query(ctx, "SELECT nugget, length FROM manifest_nuggets WHERE manifest_id = $1 ORDER BY seq", id)
+	rows, err := tx.Query(ctx, `
+		SELECT mn.nugget, mn.length, coalesce(r.veins, '{}')
+		FROM manifest_nuggets mn
+		LEFT JOIN LATERAL (SELECT array_agg(vein_id ORDER BY vein_id) AS veins FROM nugget_replicas WHERE nugget = mn.nugget) r ON true
+		WHERE mn.manifest_id = $1 ORDER BY mn.seq`, id)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (NuggetRef, error) {
 		var b []byte
 		var n NuggetRef
-		if err := r.Scan(&b, &n.Length); err != nil {
+		if err := r.Scan(&b, &n.Length, &n.Replicas); err != nil {
 			return n, err
 		}
 		id, err := nugget.FromBytes(b)
