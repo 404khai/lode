@@ -62,6 +62,8 @@ jobs:
         run: make replication
       - name: Erasure-coded 4+2 bucket survives two vein losses
         run: make erasure
+      - name: Lifecycle rules (skewed clock) and quotas
+        run: make lifecycle
       - name: Chaos — kill a vein, corrupt another, heal with zero client errors
         run: make chaos
       - name: Metrics exported

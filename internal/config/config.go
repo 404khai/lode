@@ -20,6 +20,21 @@ type Config struct {
 	Tailings Tailings `yaml:"tailings"`
 	Canary   Canary   `yaml:"canary"`
 	Smelter  Smelter  `yaml:"smelter"`
+	Strata   Strata   `yaml:"strata"`
+	Claim    Claim    `yaml:"claim"`
+}
+
+// Strata configures lifecycle rules.
+type Strata struct {
+	Interval        time.Duration `yaml:"interval"`
+	TransitionDelay time.Duration `yaml:"transition_delay"` // keep old copies after a storage-class change
+	// ClockOffset makes lifecycle rules see a later time. Testing only.
+	ClockOffset time.Duration `yaml:"clock_offset"`
+}
+
+// Claim configures quota bookkeeping.
+type Claim struct {
+	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
 }
 
 // Canary configures failure detection.
@@ -104,6 +119,8 @@ func Default() Config {
 			ScrubRate: 32 << 20, ScrubPause: time.Hour,
 		},
 		Canary:  Canary{SuspectPhi: 8, DownAfter: 30 * time.Second, Interval: time.Second},
+		Strata:  Strata{Interval: time.Hour, TransitionDelay: 10 * time.Minute},
+		Claim:   Claim{ReconcileInterval: 15 * time.Minute},
 		Smelter: Smelter{Workers: 4, BandwidthBytes: 64 << 20},
 		Cluster: Cluster{StaleAfter: 10 * time.Second},
 		Tailings: Tailings{
@@ -170,15 +187,19 @@ func applyEnv(cfg *Config) {
 		}
 	}
 	for env, dst := range map[string]*time.Duration{
-		"LODE_TAILINGS_GRACE":         &cfg.Tailings.Grace,
-		"LODE_TAILINGS_INTERVAL":      &cfg.Tailings.Interval,
-		"LODE_TAILINGS_UPLOAD_EXPIRY": &cfg.Tailings.UploadExpiry,
-		"LODE_VEIN_HEARTBEAT":         &cfg.Vein.Heartbeat,
-		"LODE_VEIN_COMPACT_INTERVAL":  &cfg.Vein.CompactInterval,
-		"LODE_VEIN_SCRUB_PAUSE":       &cfg.Vein.ScrubPause,
-		"LODE_CANARY_DOWN_AFTER":      &cfg.Canary.DownAfter,
-		"LODE_ADIT_REBALANCE":         &cfg.Adit.Rebalance,
-		"LODE_CLUSTER_STALE_AFTER":    &cfg.Cluster.StaleAfter,
+		"LODE_TAILINGS_GRACE":           &cfg.Tailings.Grace,
+		"LODE_TAILINGS_INTERVAL":        &cfg.Tailings.Interval,
+		"LODE_TAILINGS_UPLOAD_EXPIRY":   &cfg.Tailings.UploadExpiry,
+		"LODE_VEIN_HEARTBEAT":           &cfg.Vein.Heartbeat,
+		"LODE_VEIN_COMPACT_INTERVAL":    &cfg.Vein.CompactInterval,
+		"LODE_VEIN_SCRUB_PAUSE":         &cfg.Vein.ScrubPause,
+		"LODE_CANARY_DOWN_AFTER":        &cfg.Canary.DownAfter,
+		"LODE_ADIT_REBALANCE":           &cfg.Adit.Rebalance,
+		"LODE_STRATA_INTERVAL":          &cfg.Strata.Interval,
+		"LODE_STRATA_CLOCK_OFFSET":      &cfg.Strata.ClockOffset,
+		"LODE_STRATA_TRANSITION_DELAY":  &cfg.Strata.TransitionDelay,
+		"LODE_CLAIM_RECONCILE_INTERVAL": &cfg.Claim.ReconcileInterval,
+		"LODE_CLUSTER_STALE_AFTER":      &cfg.Cluster.StaleAfter,
 	} {
 		if v, ok := os.LookupEnv(env); ok {
 			if d, err := time.ParseDuration(v); err == nil {

@@ -124,7 +124,10 @@ func (s *Server) copyObject(req *request) error {
 		}
 	}
 	src.VersionID = o.VersionID // copy exactly the version we checked conditions against
-	copied, res, err := s.ledger.CopyObject(r.Context(), src, req.bucket, req.key, headers, tags, writeCondition(r))
+	if err := s.ledger.QuotaHeadroom(r.Context(), req.bucket, req.auth.AccessKey, req.key, o.Size); err != nil {
+		return err
+	}
+	copied, res, err := s.ledger.CopyObject(r.Context(), src, req.bucket, req.key, headers, tags, writeCondition(r), req.auth.AccessKey)
 	if err != nil {
 		return err
 	}

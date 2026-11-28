@@ -21,6 +21,7 @@ import (
 
 	"github.com/404khai/lode/internal/adit"
 	"github.com/404khai/lode/internal/canary"
+	"github.com/404khai/lode/internal/claim"
 	"github.com/404khai/lode/internal/cluster"
 	"github.com/404khai/lode/internal/config"
 	"github.com/404khai/lode/internal/events"
@@ -28,6 +29,7 @@ import (
 	"github.com/404khai/lode/internal/logging"
 	"github.com/404khai/lode/internal/nugget"
 	"github.com/404khai/lode/internal/smelter"
+	"github.com/404khai/lode/internal/strata"
 	"github.com/404khai/lode/internal/survey"
 	"github.com/404khai/lode/internal/tailings"
 	"github.com/404khai/lode/internal/version"
@@ -143,6 +145,13 @@ func run() error {
 	})
 	go detector.Run(ctx)
 	go repair.Run(ctx)
+	lifecycle := strata.New(strata.Options{
+		Ledger: led, Cluster: veins, Logger: log.With("component", "strata"), Registerer: reg, Events: bus,
+		Interval: cfg.Strata.Interval, ClockOffset: cfg.Strata.ClockOffset, TransitionDelay: cfg.Strata.TransitionDelay,
+		DefaultReplication: cfg.Adit.Replication,
+	})
+	go lifecycle.Run(ctx)
+	go claim.NewReconciler(led, log.With("component", "claim"), reg, cfg.Claim.ReconcileInterval).Run(ctx)
 	if cfg.Adit.Rebalance > 0 {
 		placer, err := survey.ByName(cfg.Adit.Placement, nil)
 		if err != nil {

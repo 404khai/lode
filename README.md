@@ -36,6 +36,10 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
   CreateBucket) stores each nugget as 4 data + 2 parity shards on 6 veins: 1.5x overhead, any two
   veins can be lost. Placement per bucket: `hrw`, `zone-spread`, `capacity-weighted`, `pinned:...`.
   The rebalancer moves ~1/N of data when a vein joins.
+- Quotas: `lode quota set bucket photos -bytes 10737418240` (or `key <access-key>`); writes past a
+  quota fail with `QuotaExceeded`. Lifecycle: `PutBucketLifecycleConfiguration` with expiration,
+  noncurrent-version expiration, abort-incomplete-multipart and transitions to `STANDARD` or
+  `EC_K_M` (e.g. `EC_4_2`).
 - Healing: Canary (phi-accrual) marks silent veins suspect then down; Smelter re-replicates
   everything they held; Assay scrubs every vein and repairs corrupt copies. Operate with
   `lode veins`, `lode vein drain <id>`, `lode vein remove <id>`, `lode repairs`.
@@ -46,7 +50,7 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
   crc32, crc32c, crc64nvme, sha1 and sha256.
 - Access: single-tenant and owner-only. ACL reads return the owner with `FULL_CONTROL`; the canned
   `private` ACL is accepted; public ACLs, grants and bucket policies are refused with `NotImplemented`.
-- Not yet: lifecycle (next phase), server-side encryption (requests asking for it are refused rather
+- Not yet: server-side encryption (requests asking for it are refused rather
   than silently stored in plaintext), bucket policies, CORS, object lock, virtual-hosted addressing.
   Compatibility is tracked in `test/s3compat/tests.txt`.
 
@@ -55,7 +59,7 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
 ```bash
 make build test lint
 LODE_TEST_DSN=postgres://localhost/lode_test make test   # include Postgres-backed tests
-make up && make e2e && make corruption && make replication && make erasure && make chaos
+make up && make e2e && make corruption && make replication && make erasure && make lifecycle && make chaos
 ```
 
 Licensed under the [Apache License 2.0](LICENSE).

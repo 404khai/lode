@@ -97,13 +97,16 @@ func (s *Server) putObject(req *request) error {
 	if err != nil {
 		return err
 	}
+	if err := s.precheckQuota(req); err != nil {
+		return err
+	}
 	in, err := s.ingest(req, maxPutSize, bucket, "")
 	if err != nil {
 		return err
 	}
 	v := ledger.Version{
 		Size: in.size, ETag: `"` + hex.EncodeToString(in.md5) + `"`, Headers: headers,
-		ChunkSize: nugget.AvgSize, Nuggets: in.nuggets, Tags: tags,
+		ChunkSize: nugget.AvgSize, Nuggets: in.nuggets, Tags: tags, AccessKey: req.auth.AccessKey,
 	}
 	if in.sum != nil {
 		v.ChecksumAlgorithm, v.ChecksumValue = in.sum.algorithm, in.sum.expected
@@ -121,6 +124,18 @@ func (s *Server) putObject(req *request) error {
 	}
 	req.w.WriteHeader(http.StatusOK)
 	return nil
+}
+
+// precheckQuota refuses an upload whose declared size would exceed a quota,
+// before any of the body is read. The commit re-checks under lock.
+func (s *Server) precheckQuota(req *request) error {
+	size := req.r.ContentLength
+	if v := req.r.Header.Get("X-Amz-Decoded-Content-Length"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			size = n
+		}
+	}
+	return s.ledger.QuotaHeadroom(req.r.Context(), req.bucket, req.auth.AccessKey, req.key, max(size, 0))
 }
 
 // byteRange is an inclusive range within an object.

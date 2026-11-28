@@ -262,7 +262,7 @@ func TestBucketOperations(t *testing.T) {
 	h.expect(h.do("DELETE", "/photos/a", nil, nil), 204, "")
 	h.expect(h.do("DELETE", "/photos", nil, nil), 204, "")
 	h.expect(h.do("DELETE", "/photos", nil, nil), 404, "NoSuchBucket")
-	h.expect(h.do("GET", "/photos?lifecycle", nil, nil), 501, "NotImplemented")
+	h.expect(h.do("GET", "/photos?cors", nil, nil), 501, "NotImplemented")
 }
 
 func TestPutGetObject(t *testing.T) {

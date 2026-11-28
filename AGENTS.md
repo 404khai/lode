@@ -104,8 +104,9 @@ make dedup            # uploads one file twice and checks it is stored once (DED
 make replication      # kills a vein mid-upload, then reads with each vein down (VEIN_STOP/VEIN_START with __N__ override the compose commands)
 make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against an Adit on :9000 (see test/s3compat/adit.yaml)
 make erasure          # 4+2 bucket on 6 veins: reads with each pair of veins down
+make lifecycle        # lifecycle rules under a +40-day skewed clock, and QuotaExceeded on overrun
 make chaos            # kills a vein and corrupts another under read load; waits for full redundancy, zero client errors
-./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs, bucket create -ec K+M
+./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs, bucket create -ec K+M, quota set|list
 ```
 
 ## 5. Rules for agents
@@ -175,7 +176,7 @@ phase's exit criteria pass in CI.
 ### Phase 6 — Quotas & lifecycle
 - Claim: per-bucket and per-access-key quotas (bytes, objects), enforced at Adit before data is accepted; usage counters reconciled by background job.
 - Strata: `PutBucketLifecycleConfiguration` subset — expiration, noncurrent-version expiration, abort-incomplete-multipart, transition between replication and EC classes.
-- **Exit:** lifecycle rules verified by e2e with time-skew test clock; quota overrun returns `QuotaExceeded`.
+- **Exit:** lifecycle rules verified by e2e with time-skew test clock; quota overrun returns `QuotaExceeded`. ✅
 
 ### Phase 7 — Foreman (MCP server)
 Agent-native surface. Read-only tools are default; mutating tools require `--allow-write` and are tagged destructive.

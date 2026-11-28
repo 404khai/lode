@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -133,6 +134,7 @@ type Version struct {
 	ChecksumType      string // COMPOSITE or FULL_OBJECT for multipart objects; "" otherwise
 	Headers           map[string]string
 	Tags              map[string]string
+	AccessKey         string // who wrote this version (per-key quotas)
 	ChunkSize         int
 	PartsCount        int
 	PartSizes         []int64 // sizes of the parts of a multipart object
@@ -246,6 +248,9 @@ func (l *Ledger) DeleteBucket(ctx context.Context, name string) error {
 			if err := abortLocked(ctx, tx, u); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM usage_counters WHERE scope = 'bucket' AND subject = $1", name); err != nil {
+			return err
 		}
 		_, err = tx.Exec(ctx, "DELETE FROM buckets WHERE id = $1", id)
 		return err
@@ -464,13 +469,21 @@ func lockObject(ctx context.Context, tx pgx.Tx, bucketID int64, key string, crea
 // dropVersion deletes one version row and its manifest.
 func dropVersion(ctx context.Context, tx pgx.Tx, objectID int64, versionID string) (found, wasMarker bool, err error) {
 	var manifestID *int64
-	err = tx.QueryRow(ctx, "DELETE FROM object_versions WHERE object_id = $1 AND version_id = $2 RETURNING manifest_id, is_delete_marker",
-		objectID, versionID).Scan(&manifestID, &wasMarker)
+	var size int64
+	var accessKey string
+	err = tx.QueryRow(ctx, `DELETE FROM object_versions WHERE object_id = $1 AND version_id = $2
+		RETURNING manifest_id, is_delete_marker, size, access_key`,
+		objectID, versionID).Scan(&manifestID, &wasMarker, &size, &accessKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {
 		return false, false, err
+	}
+	if !wasMarker {
+		if err := adjustUsage(ctx, tx, objectID, accessKey, -size, -1, false); err != nil {
+			return false, false, err
+		}
 	}
 	if manifestID != nil {
 		err = dropManifest(ctx, tx, *manifestID)
@@ -515,13 +528,18 @@ func addVersion(ctx context.Context, tx pgx.Tx, objectID int64, versioning strin
 	if tags == nil {
 		tags = map[string]string{}
 	}
+	if !v.IsDeleteMarker {
+		if err := adjustUsage(ctx, tx, objectID, v.AccessKey, v.Size, 1, true); err != nil {
+			return "", err
+		}
+	}
 	var id int64
 	err := tx.QueryRow(ctx, `
 		INSERT INTO object_versions (object_id, manifest_id, version_id, is_delete_marker, size, etag,
-			checksum_algorithm, checksum_value, headers, parts_count, part_sizes, tags, checksum_type)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, '')) RETURNING id`,
+			checksum_algorithm, checksum_value, headers, parts_count, part_sizes, tags, checksum_type, access_key)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''), $14) RETURNING id`,
 		objectID, manifestID, versionID, v.IsDeleteMarker, v.Size, v.ETag,
-		v.ChecksumAlgorithm, v.ChecksumValue, headers, parts, v.PartSizes, tags, v.ChecksumType).Scan(&id)
+		v.ChecksumAlgorithm, v.ChecksumValue, headers, parts, v.PartSizes, tags, v.ChecksumType, v.AccessKey).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -620,6 +638,45 @@ func (l *Ledger) GetObject(ctx context.Context, bucket, key, versionID string) (
 	return o, err
 }
 
+// ErrQuotaExceeded means a write would take a bucket or access key past
+// its quota.
+var ErrQuotaExceeded = errors.New("ledger: quota exceeded")
+
+// adjustUsage changes the usage counters of the object's bucket and of
+// accessKey, and with enforce set fails with ErrQuotaExceeded if either is
+// now over its quota. The counter rows stay locked until the transaction
+// ends, so concurrent writes cannot jointly overshoot a quota.
+func adjustUsage(ctx context.Context, tx pgx.Tx, objectID int64, accessKey string, dBytes, dObjects int64, enforce bool) error {
+	var bucket string
+	if err := tx.QueryRow(ctx, "SELECT b.name FROM objects o JOIN buckets b ON b.id = o.bucket_id WHERE o.id = $1", objectID).Scan(&bucket); err != nil {
+		return err
+	}
+	subjects := [][2]string{{"bucket", bucket}}
+	if accessKey != "" {
+		subjects = append(subjects, [2]string{"key", accessKey})
+	}
+	for _, sub := range subjects {
+		var bytes, objects int64
+		var maxBytes, maxObjects *int64
+		err := tx.QueryRow(ctx, `
+			WITH u AS (
+				INSERT INTO usage_counters (scope, subject, bytes, objects) VALUES ($1, $2, greatest($3, 0), greatest($4, 0))
+				ON CONFLICT (scope, subject) DO UPDATE SET bytes = greatest(usage_counters.bytes + $3, 0),
+					objects = greatest(usage_counters.objects + $4, 0)
+				RETURNING bytes, objects)
+			SELECT u.bytes, u.objects, q.max_bytes, q.max_objects
+			FROM u LEFT JOIN quotas q ON q.scope = $1 AND q.subject = $2`, sub[0], sub[1], dBytes, dObjects).
+			Scan(&bytes, &objects, &maxBytes, &maxObjects)
+		if err != nil {
+			return err
+		}
+		if enforce && ((maxBytes != nil && bytes > *maxBytes) || (maxObjects != nil && objects > *maxObjects)) {
+			return fmt.Errorf("%w: %s %s", ErrQuotaExceeded, sub[0], sub[1])
+		}
+	}
+	return nil
+}
+
 // CopySource names the object version a copy reads from.
 type CopySource struct {
 	Bucket, Key, VersionID string
@@ -629,7 +686,7 @@ type CopySource struct {
 // move. headers and tags replace src's when non-nil. The source is read in
 // the same transaction, so a concurrent overwrite of src cannot tear it.
 func (l *Ledger) CopyObject(ctx context.Context, src CopySource, dstBucket, dstKey string,
-	headers, tags map[string]string, cond Condition) (copied *Object, res WriteResult, err error) {
+	headers, tags map[string]string, cond Condition, accessKey string) (copied *Object, res WriteResult, err error) {
 	err = pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
 		srcBucketID, _, err := lockBucket(ctx, tx, src.Bucket)
 		if err != nil {
@@ -687,7 +744,7 @@ func (l *Ledger) CopyObject(ctx context.Context, src CopySource, dstBucket, dstK
 		}
 		res.Versioning = versioning
 		v := o.Version
-		v.VersionID, v.LastModified = "", time.Time{}
+		v.VersionID, v.LastModified, v.AccessKey = "", time.Time{}, accessKey
 		if headers != nil {
 			v.Headers = headers
 		}
