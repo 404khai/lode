@@ -125,7 +125,7 @@ func newClusterHarness(t *testing.T, n, replication int) *harness {
 		}
 		veins = append(veins, v)
 	}
-	cl := cluster.New(cluster.Options{Ledger: led, Registerer: reg, Logger: testLogger(), StaleAfter: time.Hour, Backoff: 200 * time.Millisecond, RPCTimeout: 5 * time.Second})
+	cl := cluster.New(cluster.Options{Ledger: led, Registerer: reg, Logger: testLogger(), StaleAfter: time.Hour, Backoff: 200 * time.Millisecond, RPCTimeout: 30 * time.Second})
 	if err := cl.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}

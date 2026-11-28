@@ -158,15 +158,6 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 	for _, v := range job.BadVeins {
 		bad[v] = true
 	}
-	// Corrupt copies are forgotten and deleted first; repair rewrites them.
-	for v := range bad {
-		if err := s.opts.Ledger.RemoveReplica(ctx, job.Nugget, v); err != nil {
-			return "", "", err
-		}
-		if err := s.opts.Cluster.Delete(ctx, v, job.Nugget); err != nil {
-			s.log.Debug("delete corrupt copy", "vein", v, "nugget", job.Nugget.String(), "err", err)
-		}
-	}
 	avail := map[string]bool{}
 	for _, n := range s.opts.Cluster.Available() {
 		avail[n.ID] = true
@@ -186,6 +177,7 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 	}
 
 	written := 0
+	holdingNew := map[string]bool{} // veins given a fresh copy by this job
 	if len(good) < want {
 		if len(sources) == 0 {
 			return "", "", fmt.Errorf("smelter: no copy of %s left to read", job.Nugget)
@@ -197,6 +189,13 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 		holding := map[string]bool{}
 		for _, v := range st.Replicas {
 			holding[v] = !bad[v]
+		}
+		// A vein whose copy is corrupt gets a fresh one: drop the bad copy
+		// first so the rewrite is not mistaken for a duplicate.
+		for v := range bad {
+			if err := s.opts.Cluster.Delete(ctx, v, job.Nugget); err != nil {
+				s.log.Debug("delete corrupt copy", "vein", v, "nugget", job.Nugget.String(), "err", err)
+			}
 		}
 		nodes := s.opts.Cluster.Available()
 		for _, n := range survey.Place(job.Nugget, len(nodes), nodes) {
@@ -217,6 +216,7 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 				return "", "", err
 			}
 			holding[n.ID] = true
+			holdingNew[n.ID] = true
 			written++
 			s.copies.Inc()
 			s.bytes.Add(float64(len(data)))
@@ -225,7 +225,20 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 			return "", "", fmt.Errorf("%w: %d of %d copies", errNotEnoughVeins, len(good)+written, want)
 		}
 	}
-	// Full redundancy elsewhere: release copies held by draining veins.
+	// Full redundancy now exists without them: forget corrupt copies (kept
+	// until now so the bytes survive if nothing could be repaired) and
+	// release copies held by draining veins.
+	for v := range bad {
+		if holdingNew[v] {
+			continue // rewritten with good bytes above
+		}
+		if err := s.opts.Ledger.RemoveReplica(ctx, job.Nugget, v); err != nil {
+			return "", "", err
+		}
+		if err := s.opts.Cluster.Delete(ctx, v, job.Nugget); err != nil {
+			s.log.Debug("delete corrupt copy", "vein", v, "nugget", job.Nugget.String(), "err", err)
+		}
+	}
 	for _, v := range draining {
 		if err := s.opts.Ledger.RemoveReplica(ctx, job.Nugget, v); err != nil {
 			return "", "", err

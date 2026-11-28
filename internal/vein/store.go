@@ -42,6 +42,8 @@ var (
 	ErrNotFound = errors.New("vein: nugget not found")
 	// ErrCorrupt means the stored bytes no longer hash to the nugget ID.
 	ErrCorrupt = errors.New("vein: nugget corrupt")
+	// ErrClosed means the store has been closed.
+	ErrClosed = errors.New("vein: store closed")
 )
 
 const (
@@ -98,6 +100,11 @@ type Store struct {
 	log     *slog.Logger
 	bus     *events.Bus
 	db      *pebble.DB
+
+	// life guards the store's lifetime: every operation holds it shared and
+	// Close holds it exclusively, so nothing touches the index after Close.
+	life   sync.RWMutex
+	closed bool
 
 	mu      sync.Mutex // serialises writes, deletes, rotation and compaction
 	active  *os.File
@@ -222,6 +229,16 @@ func (s *Store) useSegment(n uint32) error {
 	return nil
 }
 
+// enter starts an operation; the returned func ends it.
+func (s *Store) enter() (func(), error) {
+	s.life.RLock()
+	if s.closed {
+		s.life.RUnlock()
+		return nil, ErrClosed
+	}
+	return s.life.RUnlock, nil
+}
+
 func (s *Store) lookup(id nugget.ID) (entry, error) {
 	v, closer, err := s.db.Get(indexKey(id))
 	if errors.Is(err, pebble.ErrNotFound) {
@@ -237,13 +254,18 @@ func (s *Store) lookup(id nugget.ID) (entry, error) {
 // Put stores data under id. Storing a nugget that is already present is a
 // no-op. data must hash to id.
 func (s *Store) Put(id nugget.ID, data []byte) error {
+	leave, err := s.enter()
+	if err != nil {
+		return err
+	}
+	defer leave()
 	if nugget.Sum(data) != id {
 		return fmt.Errorf("vein: data does not match nugget id %s", id)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.lookup(id)
+	_, err = s.lookup(id)
 	switch {
 	case err == nil:
 		s.dedups.Inc()
@@ -304,6 +326,11 @@ func (s *Store) reader(n uint32) (*os.File, error) {
 // Get returns the nugget's bytes after verifying them against id. It never
 // returns bytes that fail verification.
 func (s *Store) Get(id nugget.ID) ([]byte, error) {
+	leave, err := s.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
 	s.gets.Inc()
 	for attempt := 0; ; attempt++ {
 		buf, err := s.read(id)
@@ -352,6 +379,11 @@ func (s *Store) markCorrupt(id nugget.ID, reason string) error {
 // error. Only Tailings calls this, after the Ledger confirms the nugget is
 // unreferenced. The bytes stay in the segment until Compact.
 func (s *Store) Delete(id nugget.ID) error {
+	leave, err := s.enter()
+	if err != nil {
+		return err
+	}
+	defer leave()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.lookup(id); errors.Is(err, ErrNotFound) {
@@ -365,7 +397,12 @@ func (s *Store) Delete(id nugget.ID) error {
 
 // Has reports whether id is stored.
 func (s *Store) Has(id nugget.ID) (bool, error) {
-	_, err := s.lookup(id)
+	leave, err := s.enter()
+	if err != nil {
+		return false, err
+	}
+	defer leave()
+	_, err = s.lookup(id)
 	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	}
@@ -386,6 +423,11 @@ type CompactStats struct {
 // left untouched so Assay and Smelter can deal with it.
 func (s *Store) Compact(minDead float64) (CompactStats, error) {
 	var st CompactStats
+	leave, err := s.enter()
+	if err != nil {
+		return st, err
+	}
+	defer leave()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -486,8 +528,14 @@ func (s *Store) evacuateLocked(n uint32, ids []nugget.ID) (bool, error) {
 	return true, batch.Commit(pebble.Sync)
 }
 
-// Close flushes and closes the store.
+// Close flushes and closes the store. Operations after Close return ErrClosed.
 func (s *Store) Close() error {
+	s.life.Lock()
+	defer s.life.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rmu.Lock()
@@ -507,6 +555,10 @@ func (s *Store) Close() error {
 // that fails verification. limit, if set, paces the scan to that many bytes
 // per second. It stops early when ctx is done.
 func (s *Store) Scrub(ctx context.Context, limit int64, corrupt func(nugget.ID)) (scanned int64, err error) {
+	leave, err := s.enter()
+	if err != nil {
+		return 0, err
+	}
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte(keyPrefix), UpperBound: []byte("n0")})
 	if err != nil {
 		return 0, err
@@ -517,8 +569,10 @@ func (s *Store) Scrub(ctx context.Context, limit int64, corrupt func(nugget.ID))
 			ids = append(ids, id)
 		}
 	}
-	if err := it.Close(); err != nil {
-		return 0, err
+	cerr := it.Close()
+	leave() // Get below re-enters per nugget, so Close is never blocked for a whole pass
+	if cerr != nil {
+		return 0, cerr
 	}
 	start := time.Now()
 	for _, id := range ids {

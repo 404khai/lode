@@ -35,6 +35,8 @@ func toStatus(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrCorrupt):
 		return status.Error(codes.DataLoss, err.Error())
+	case errors.Is(err, ErrClosed):
+		return status.Error(codes.Unavailable, err.Error())
 	}
 	return status.Error(codes.Internal, err.Error())
 }

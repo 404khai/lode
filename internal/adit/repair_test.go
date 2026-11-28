@@ -20,7 +20,7 @@ func (h *harness) drainQueue() {
 	h.t.Helper()
 	ctx := context.Background()
 	_ = h.cluster.Refresh(ctx)
-	s := smelter.New(smelter.Options{Ledger: h.ledger, Cluster: h.cluster, Owner: "test", MaxAttempts: 3})
+	s := smelter.New(smelter.Options{Ledger: h.ledger, Cluster: h.cluster, Owner: "test", MaxAttempts: 3, Logger: testLogger()})
 	for i := 0; i < 10000; i++ {
 		did, err := s.RunOne(ctx, "test")
 		if err != nil {
@@ -143,7 +143,14 @@ func TestDrainMovesEverythingThenRetires(t *testing.T) {
 	if _, err := h.ledger.SetVeinState(ctx, "v3", ledger.VeinDraining); err != nil {
 		t.Fatal(err)
 	}
-	c := canary.New(canary.Options{Ledger: h.ledger, DownAfter: time.Hour, SuspectPhi: 1e9})
+	// Keep the (heartbeat-less) test veins looking alive to Canary.
+	beat := func() {
+		if _, err := h.ledger.Pool().Exec(ctx, "UPDATE veins SET last_heartbeat = now()"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := canary.New(canary.Options{Ledger: h.ledger, DownAfter: time.Hour})
+	beat()
 	if err := c.Tick(ctx); err != nil { // queues drain jobs
 		t.Fatal(err)
 	}
@@ -151,6 +158,7 @@ func TestDrainMovesEverythingThenRetires(t *testing.T) {
 	if left, _ := h.ledger.VeinReplicaCount(ctx, "v3"); left != 0 {
 		t.Fatalf("%d copies left on draining vein", left)
 	}
+	beat()
 	if err := c.Tick(ctx); err != nil { // retires the empty vein
 		t.Fatal(err)
 	}
