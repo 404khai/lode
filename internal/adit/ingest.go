@@ -2,6 +2,7 @@ package adit
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5" // #nosec G501 -- S3 ETag and Content-MD5, not used for security
 	"encoding/base64"
 	"errors"
@@ -38,9 +39,11 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // replicas, so Tailings cannot reclaim it while the upload is in flight, and
 // is written to a quorum of veins chosen by Survey. On failure the written
 // nuggets stay unreferenced and are reclaimed after the grace window.
-func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ingested, error) {
+//
+// defaultAlgo, if set and the request declares no checksum, makes ingest
+// compute that checksum itself (multipart uploads with a checksum algorithm).
+func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket, defaultAlgo string) (*ingested, error) {
 	r := req.r
-	replicas, quorum := s.writePolicy(bucket)
 	var md5Want []byte
 	if v := r.Header.Get("Content-MD5"); v != "" {
 		var err error
@@ -51,6 +54,13 @@ func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ing
 	sum, aerr := requestChecksum(r)
 	if aerr != nil {
 		return nil, aerr
+	}
+	computed := false
+	if sum == nil && defaultAlgo != "" {
+		sum = &checksum{algorithm: defaultAlgo, h: checksumAlgorithms[defaultAlgo]()}
+		computed = true
+	} else if sum != nil && defaultAlgo != "" && sum.algorithm != defaultAlgo {
+		return nil, errf(http.StatusBadRequest, "InvalidRequest", "Checksum Type mismatch occurred, expected checksum Type: %s, actual checksum Type: %s", defaultAlgo, sum.algorithm)
 	}
 	body, err := s.payloadReader(req)
 	if err != nil {
@@ -63,13 +73,54 @@ func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ing
 		return nil, errEntityTooLarge
 	}
 
+	counted := &countingReader{r: io.LimitReader(body, body.size)}
+	out, err := s.storeStream(r.Context(), counted, bucket, sum)
+	if err != nil {
+		return nil, err
+	}
+	if counted.n != body.size {
+		return nil, errIncompleteBody
+	}
+	// Drain the stream terminator (and trailers); nothing else may follow.
+	if extra, rerr := io.Copy(io.Discard, io.LimitReader(body, 1)); rerr != nil {
+		return nil, rerr
+	} else if extra > 0 {
+		return nil, errf(http.StatusBadRequest, "IncompleteBody", "The request body is longer than the declared content length.")
+	}
+	if err := body.verify(); err != nil {
+		return nil, err
+	}
+	if md5Want != nil && !bytes.Equal(md5Want, out.md5) {
+		return nil, errBadDigest
+	}
+	if computed {
+		sum.expected = sum.sum()
+	} else if sum != nil {
+		if sum.trailer {
+			sum.expected = body.trailer(sum.header())
+		}
+		if sum.expected == "" {
+			return nil, errInvalidDigest
+		}
+		if sum.sum() != sum.expected {
+			return nil, errBadDigest
+		}
+	}
+	s.bytesIn.Add(float64(out.size))
+	return out, nil
+}
+
+// storeStream chunks src and stores every nugget at the bucket's replication,
+// touching each in the Ledger before writing it. sum, if set, is fed the
+// bytes. It returns the manifest entries, size and MD5.
+func (s *Server) storeStream(ctx context.Context, src io.Reader, bucket ledger.Bucket, sum *checksum) (*ingested, error) {
+	replicas, quorum := s.writePolicy(bucket)
 	md5h := md5.New() // #nosec G401
 	hashers := []hash.Hash{md5h}
 	if sum != nil {
 		hashers = append(hashers, sum.h)
 	}
-	counted := &countingReader{r: io.LimitReader(body, body.size)}
-	chunker := nugget.NewChunker(counted)
+	chunker := nugget.NewChunker(src)
 	out := &ingested{sum: sum}
 	for {
 		data, err := chunker.Next()
@@ -86,13 +137,13 @@ func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ing
 			h.Write(data)
 		}
 		ref := ledger.NuggetRef{ID: nugget.Sum(data), Length: int64(len(data))}
-		existing, err := s.ledger.TouchNugget(r.Context(), ref, replicas)
+		existing, err := s.ledger.TouchNugget(ctx, ref, replicas)
 		if err != nil {
 			return nil, err
 		}
-		written, serr := s.cluster.Store(r.Context(), ref.ID, data, existing, replicas, quorum)
+		written, serr := s.cluster.Store(ctx, ref.ID, data, existing, replicas, quorum)
 		// Record every copy that landed, even on failure, so Tailings can find it.
-		if err := s.ledger.AddReplicas(r.Context(), ref.ID, written); err != nil {
+		if err := s.ledger.AddReplicas(ctx, ref.ID, written); err != nil {
 			return nil, err
 		}
 		if serr != nil {
@@ -101,33 +152,6 @@ func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket) (*ing
 		out.nuggets = append(out.nuggets, ref)
 		out.size += ref.Length
 	}
-	if counted.n != body.size {
-		return nil, errIncompleteBody
-	}
-	// Drain the stream terminator (and trailers); nothing else may follow.
-	if extra, rerr := io.Copy(io.Discard, io.LimitReader(body, 1)); rerr != nil {
-		return nil, rerr
-	} else if extra > 0 {
-		return nil, errf(http.StatusBadRequest, "IncompleteBody", "The request body is longer than the declared content length.")
-	}
-	if err := body.verify(); err != nil {
-		return nil, err
-	}
 	out.md5 = md5h.Sum(nil)
-	if md5Want != nil && !bytes.Equal(md5Want, out.md5) {
-		return nil, errBadDigest
-	}
-	if sum != nil {
-		if sum.trailer {
-			sum.expected = body.trailer(sum.header())
-		}
-		if sum.expected == "" {
-			return nil, errInvalidDigest
-		}
-		if sum.sum() != sum.expected {
-			return nil, errBadDigest
-		}
-	}
-	s.bytesIn.Add(float64(out.size))
 	return out, nil
 }

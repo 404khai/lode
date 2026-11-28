@@ -163,9 +163,9 @@ func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 // subresources Adit does not implement yet; requests for them get 501
 // rather than being mistaken for plain object or bucket operations.
 var unsupportedSubresources = []string{
-	"acl", "cors", "encryption", "lifecycle", "logging", "notification", "object-lock", "ownershipControls",
+	"cors", "encryption", "lifecycle", "logging", "notification", "object-lock", "ownershipControls",
 	"policy", "policyStatus", "publicAccessBlock", "replication", "requestPayment", "restore", "retention",
-	"legal-hold", "select", "tagging", "torrent", "website",
+	"legal-hold", "select", "torrent", "website",
 	"accelerate", "analytics", "intelligent-tiering", "inventory", "metrics", "attributes",
 }
 
@@ -178,9 +178,27 @@ func (s *Server) route(req *request) error {
 			return errNotImplemented
 		}
 	}
-	if r.Header.Get("X-Amz-Copy-Source") != "" {
-		req.op = "CopyObject"
-		return errNotImplemented
+	if r.Method == http.MethodPut || r.Method == http.MethodPost {
+		if aerr := rejectSSE(r); aerr != nil {
+			req.op = "Unsupported"
+			return aerr
+		}
+	}
+	if r.Header.Get("X-Amz-Server-Side-Encryption-Customer-Algorithm") != "" {
+		req.op = "Unsupported"
+		return errf(http.StatusNotImplemented, "NotImplemented", "Server-side encryption is not supported by Lode yet.")
+	}
+	if req.bucket != "" && (q.Has("tagging") || q.Has("acl")) {
+		if req.key == "" {
+			if q.Has("tagging") {
+				return s.bucketTagging(req)
+			}
+			return s.acl(req, false)
+		}
+		if q.Has("tagging") {
+			return s.objectTagging(req)
+		}
+		return s.acl(req, true)
 	}
 
 	switch {
@@ -254,9 +272,17 @@ func (s *Server) route(req *request) error {
 				return s.completeUpload(req, uploadID)
 			}
 		case http.MethodPut:
-			if uploadID != "" {
+			copySource := r.Header.Get("X-Amz-Copy-Source") != ""
+			switch {
+			case uploadID != "" && copySource:
+				req.op = "UploadPartCopy"
+				return s.uploadPartCopy(req, uploadID)
+			case uploadID != "":
 				req.op = "UploadPart"
 				return s.uploadPart(req, uploadID)
+			case copySource:
+				req.op = "CopyObject"
+				return s.copyObject(req)
 			}
 			req.op = "PutObject"
 			return s.putObject(req)
@@ -308,6 +334,8 @@ func (s *Server) toAPIError(req *request, err error) *apiError {
 		return errEntityTooSmall
 	case errors.Is(err, ledger.ErrPreconditionFailed):
 		return errPreconditionFailed
+	case errors.Is(err, ledger.ErrCopyFromDeleteMarker):
+		return errMethodNotAllowed
 	case errors.Is(err, cluster.ErrInsufficientReplicas), errors.Is(err, cluster.ErrUnavailable):
 		s.log.Warn("storage unavailable", "op", req.op, "bucket", req.bucket, "key", req.key, "request_id", req.id, "err", err)
 		return errServiceUnavailable

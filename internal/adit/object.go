@@ -83,17 +83,27 @@ func (s *Server) putObject(req *request) error {
 	if err != nil {
 		return err
 	}
+	if aerr := checkCannedACL(req.r); aerr != nil {
+		return aerr
+	}
+	var tags map[string]string
+	if v := req.r.Header.Get("X-Amz-Tagging"); v != "" {
+		var aerr *apiError
+		if tags, aerr = parseTagHeader(v, maxObjectTags); aerr != nil {
+			return aerr
+		}
+	}
 	bucket, err := s.ledger.HeadBucket(req.r.Context(), req.bucket)
 	if err != nil {
 		return err
 	}
-	in, err := s.ingest(req, maxPutSize, bucket)
+	in, err := s.ingest(req, maxPutSize, bucket, "")
 	if err != nil {
 		return err
 	}
 	v := ledger.Version{
 		Size: in.size, ETag: `"` + hex.EncodeToString(in.md5) + `"`, Headers: headers,
-		ChunkSize: nugget.AvgSize, Nuggets: in.nuggets,
+		ChunkSize: nugget.AvgSize, Nuggets: in.nuggets, Tags: tags,
 	}
 	if in.sum != nil {
 		v.ChecksumAlgorithm, v.ChecksumValue = in.sum.algorithm, in.sum.expected
@@ -268,7 +278,13 @@ func (s *Server) getObject(req *request, head bool) error {
 	// returned for full reads.
 	if status == http.StatusOK && o.ChecksumAlgorithm != "" && strings.EqualFold(r.Header.Get("X-Amz-Checksum-Mode"), "ENABLED") {
 		h.Set("x-amz-checksum-"+o.ChecksumAlgorithm, o.ChecksumValue)
+		if o.ChecksumType != "" {
+			h.Set("x-amz-checksum-type", o.ChecksumType)
+		} else {
+			h.Set("x-amz-checksum-type", checksumFullObject)
+		}
 	}
+	setTagCount(h, o.Tags)
 	length := rng.end - rng.start + 1
 	h.Set("Content-Length", strconv.FormatInt(length, 10))
 	if head || length == 0 {

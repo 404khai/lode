@@ -72,6 +72,9 @@ func (s *Server) createBucket(req *request) error {
 	if _, err := s.readSmallBody(req); err != nil {
 		return err
 	}
+	if aerr := checkCannedACL(req.r); aerr != nil {
+		return aerr
+	}
 	replication := 0
 	if v := req.r.Header.Get("X-Lode-Replication"); v != "" {
 		n, perr := strconv.Atoi(v)

@@ -22,7 +22,9 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://photos/
 `DeleteObject`, `DeleteObjects`, `ListObjects`, `ListObjectsV2`,
 `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload`,
 `ListParts`, `ListMultipartUploads`, `PutBucketVersioning`, `GetBucketVersioning`,
-`ListObjectVersions`. Conditional writes (`If-Match` / `If-None-Match`) on PUT and Complete.
+`ListObjectVersions`, `CopyObject`, `UploadPartCopy`, `Get/Put/DeleteObjectTagging`,
+`Get/Put/DeleteBucketTagging`, `Get/PutBucketAcl`, `Get/PutObjectAcl` (owner-only, see below).
+Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
 
 - Auth: SigV4 (header and presigned), including signed and unsigned `aws-chunked` streaming with trailers.
 - Integrity: BLAKE3 per nugget on every read, MD5 ETags, `Content-MD5`, `x-amz-content-sha256`,
@@ -35,8 +37,14 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://photos/
   `lode veins`, `lode vein drain <id>`, `lode vein remove <id>`, `lode repairs`.
 - Storage: content-defined chunking (FastCDC, ~4 MiB) with dedup across objects and versions;
   unreferenced data is reclaimed by Tailings after a 24h grace window.
-- Path-style addressing only. Not yet: copy, ACLs/policies, tagging, lifecycle, SSE,
-  composite multipart checksums. Compatibility is tracked in `test/s3compat/tests.txt`.
+- Copies are metadata-only: the new version shares the source's nuggets, so no bytes move.
+- Multipart checksums: `COMPOSITE` and `FULL_OBJECT` (CRCs combined server-side) for
+  crc32, crc32c, crc64nvme, sha1 and sha256.
+- Access: single-tenant and owner-only. ACL reads return the owner with `FULL_CONTROL`; the canned
+  `private` ACL is accepted; public ACLs, grants and bucket policies are refused with `NotImplemented`.
+- Not yet: lifecycle (next phase), server-side encryption (requests asking for it are refused rather
+  than silently stored in plaintext), bucket policies, CORS, object lock, virtual-hosted addressing.
+  Compatibility is tracked in `test/s3compat/tests.txt`.
 
 ## Development
 
