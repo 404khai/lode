@@ -96,6 +96,11 @@ func (s *Smelter) processEC(ctx context.Context, job *ledger.RepairJob, st ledge
 			busy[vein] = true
 			goodIdx[idx] = true
 			rebuilt[ledger.ShardLoc{Index: idx, Vein: vein}] = true
+			var from []string
+			for _, r := range readable {
+				from = append(from, r.Vein)
+			}
+			s.emitCopy(job, from, vein, len(sh.Blob))
 			written++
 			s.copies.Inc()
 			s.bytes.Add(float64(len(sh.Blob)))

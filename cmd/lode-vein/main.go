@@ -27,6 +27,7 @@ import (
 	lodev1 "github.com/404khai/lode/gen/lode/v1"
 	"github.com/404khai/lode/internal/assay"
 	"github.com/404khai/lode/internal/config"
+	"github.com/404khai/lode/internal/events"
 	"github.com/404khai/lode/internal/ledger"
 	"github.com/404khai/lode/internal/logging"
 	"github.com/404khai/lode/internal/vein"
@@ -92,7 +93,8 @@ func run() error {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	store, err := vein.Open(vein.Options{Dir: cfg.Vein.DataDir, Logger: log, Registerer: reg})
+	bus := events.NewBus()
+	store, err := vein.Open(vein.Options{Dir: cfg.Vein.DataDir, Logger: log, Registerer: reg, Events: bus})
 	if err != nil {
 		return err
 	}
@@ -120,6 +122,7 @@ func run() error {
 		return ledger.VeinInfo{ID: id, Addr: advertise, Zone: cfg.Vein.Zone, Host: cfg.Vein.Host,
 			CapacityBytes: capacity, UsedBytes: used, IOErrors: ioErrs, CorruptNuggets: corrupt}
 	}
+	go led.ForwardEvents(ctx, bus, log)
 	if err := led.RegisterVein(ctx, info()); err != nil {
 		return fmt.Errorf("register vein: %w", err)
 	}
@@ -150,7 +153,7 @@ func run() error {
 	go compactLoop(ctx, store, cfg.Vein.CompactInterval, cfg.Vein.CompactRatio, log)
 	if cfg.Vein.ScrubPause >= 0 {
 		scrub := assay.New(assay.Options{
-			Store: store, Ledger: led, VeinID: id, Logger: log.With("component", "assay"), Registerer: reg,
+			Store: store, Ledger: led, VeinID: id, Logger: log.With("component", "assay"), Registerer: reg, Events: bus,
 			BytesPerSecond: cfg.Vein.ScrubRate, Pause: cfg.Vein.ScrubPause,
 		})
 		vs.OnTriggerScrub(scrub.Trigger)

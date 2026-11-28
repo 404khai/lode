@@ -226,6 +226,7 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 			holding[n.ID] = true
 			holdingNew[n.ID] = true
 			written++
+			s.emitCopy(job, sources, n.ID, len(data))
 			s.copies.Inc()
 			s.bytes.Add(float64(len(data)))
 		}
@@ -262,6 +263,17 @@ func (s *Smelter) process(ctx context.Context, job *ledger.RepairJob) (outcome, 
 		}})
 	}
 	return "repaired", "", nil
+}
+
+// emitCopy reports one copy written by repair, for Lantern's flow view.
+func (s *Smelter) emitCopy(job *ledger.RepairJob, sources []string, to string, bytes int) {
+	from := ""
+	if len(sources) > 0 {
+		from = sources[0]
+	}
+	s.opts.Events.Publish(events.Event{Type: "repair.copy", Component: "smelter", Attrs: map[string]any{
+		"nugget": job.Nugget.String(), "reason": job.Reason, "from": from, "to": to, "bytes": bytes,
+	}})
 }
 
 // limiter is a simple shared byte-rate limiter.
