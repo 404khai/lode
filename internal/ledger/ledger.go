@@ -105,7 +105,9 @@ type Version struct {
 	ETag              string
 	ChecksumAlgorithm string
 	ChecksumValue     string
+	ChecksumType      string // COMPOSITE or FULL_OBJECT for multipart objects; "" otherwise
 	Headers           map[string]string
+	Tags              map[string]string
 	ChunkSize         int
 	PartsCount        int
 	PartSizes         []int64 // sizes of the parts of a multipart object
@@ -133,6 +135,8 @@ type WriteResult struct {
 	VersionID    string
 	Versioning   string
 	DeleteMarker bool
+	// Multipart checksum computed at Complete, if the upload declared one.
+	ChecksumAlgorithm, ChecksumValue, ChecksumType string
 }
 
 type Ledger struct {
@@ -384,13 +388,17 @@ func addVersion(ctx context.Context, tx pgx.Tx, objectID int64, versioning strin
 	if v.PartsCount > 0 {
 		parts = &v.PartsCount
 	}
+	tags := v.Tags
+	if tags == nil {
+		tags = map[string]string{}
+	}
 	var id int64
 	err := tx.QueryRow(ctx, `
 		INSERT INTO object_versions (object_id, manifest_id, version_id, is_delete_marker, size, etag,
-			checksum_algorithm, checksum_value, headers, parts_count, part_sizes)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11) RETURNING id`,
+			checksum_algorithm, checksum_value, headers, parts_count, part_sizes, tags, checksum_type)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, '')) RETURNING id`,
 		objectID, manifestID, versionID, v.IsDeleteMarker, v.Size, v.ETag,
-		v.ChecksumAlgorithm, v.ChecksumValue, headers, parts, v.PartSizes).Scan(&id)
+		v.ChecksumAlgorithm, v.ChecksumValue, headers, parts, v.PartSizes, tags, v.ChecksumType).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -454,13 +462,13 @@ func (l *Ledger) GetObject(ctx context.Context, bucket, key, versionID string) (
 	var parts *int
 	err = tx.QueryRow(ctx, `
 		SELECT v.manifest_id, v.version_id, v.is_delete_marker, v.size, v.etag, v.checksum_algorithm, v.checksum_value,
-		       v.headers, v.created_at, v.parts_count, v.part_sizes, m.chunk_size
+		       v.headers, v.created_at, v.parts_count, v.part_sizes, m.chunk_size, v.tags, coalesce(v.checksum_type, '')
 		FROM objects o
 		JOIN object_versions v ON v.object_id = o.id
 		LEFT JOIN manifests m ON m.id = v.manifest_id
 		WHERE o.bucket_id = $1 AND o.key = $2 AND `+cond, args...).
 		Scan(&manifestID, &o.VersionID, &o.IsDeleteMarker, &o.Size, &o.ETag, &algo, &sum,
-			&o.Headers, &o.LastModified, &parts, &o.PartSizes, &chunk)
+			&o.Headers, &o.LastModified, &parts, &o.PartSizes, &chunk, &o.Tags, &o.ChecksumType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if versionID != "" {
 			return nil, ErrNoSuchVersion
@@ -487,6 +495,165 @@ func (l *Ledger) GetObject(ctx context.Context, bucket, key, versionID string) (
 	}
 	o.Nuggets, err = loadManifest(ctx, tx, *manifestID)
 	return o, err
+}
+
+// CopySource names the object version a copy reads from.
+type CopySource struct {
+	Bucket, Key, VersionID string
+}
+
+// CopyObject writes a new version of dst that shares src's nuggets: no bytes
+// move. headers and tags replace src's when non-nil. The source is read in
+// the same transaction, so a concurrent overwrite of src cannot tear it.
+func (l *Ledger) CopyObject(ctx context.Context, src CopySource, dstBucket, dstKey string,
+	headers, tags map[string]string, cond Condition) (copied *Object, res WriteResult, err error) {
+	err = pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
+		srcBucketID, _, err := lockBucket(ctx, tx, src.Bucket)
+		if err != nil {
+			return err
+		}
+		o := &Object{Key: src.Key}
+		cond2 := "v.id = o.current_version_id"
+		args := []any{srcBucketID, src.Key}
+		if src.VersionID != "" {
+			cond2 = "v.version_id = $3"
+			args = append(args, src.VersionID)
+		}
+		var manifestID *int64
+		var algo, sum *string
+		var parts *int
+		err = tx.QueryRow(ctx, `
+			SELECT v.manifest_id, v.version_id, v.is_delete_marker, v.size, v.etag, v.checksum_algorithm, v.checksum_value,
+			       coalesce(v.checksum_type, ''), v.headers, v.tags, v.parts_count, v.part_sizes, v.created_at
+			FROM objects o JOIN object_versions v ON v.object_id = o.id
+			WHERE o.bucket_id = $1 AND o.key = $2 AND `+cond2+` FOR SHARE OF v`, args...).
+			Scan(&manifestID, &o.VersionID, &o.IsDeleteMarker, &o.Size, &o.ETag, &algo, &sum, &o.ChecksumType,
+				&o.Headers, &o.Tags, &parts, &o.PartSizes, &o.LastModified)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if src.VersionID != "" {
+				return ErrNoSuchVersion
+			}
+			return ErrNoSuchKey
+		}
+		if err != nil {
+			return err
+		}
+		if o.IsDeleteMarker {
+			if src.VersionID != "" {
+				return ErrCopyFromDeleteMarker
+			}
+			return ErrNoSuchKey
+		}
+		if algo != nil {
+			o.ChecksumAlgorithm = *algo
+		}
+		if sum != nil {
+			o.ChecksumValue = *sum
+		}
+		if parts != nil {
+			o.PartsCount = *parts
+		}
+		if o.Nuggets, err = loadManifest(ctx, tx, *manifestID); err != nil {
+			return err
+		}
+		copied = o
+
+		dstBucketID, versioning, err := lockBucket(ctx, tx, dstBucket)
+		if err != nil {
+			return err
+		}
+		res.Versioning = versioning
+		v := o.Version
+		v.VersionID, v.LastModified = "", time.Time{}
+		if headers != nil {
+			v.Headers = headers
+		}
+		if tags != nil {
+			v.Tags = tags
+		}
+		newManifest, err := insertManifest(ctx, tx, o.ChunkSize, v.Nuggets)
+		if err != nil {
+			return err
+		}
+		// The destination bucket may want more copies than the source did.
+		if _, err := tx.Exec(ctx, `UPDATE nuggets n SET replication = greatest(n.replication, b.replication)
+			FROM manifest_nuggets mn, buckets b WHERE mn.manifest_id = $1 AND n.id = mn.nugget AND b.id = $2`,
+			newManifest, dstBucketID); err != nil {
+			return err
+		}
+		objectID, err := lockObject(ctx, tx, dstBucketID, dstKey, true)
+		if err != nil {
+			return err
+		}
+		if err := checkCondition(ctx, tx, objectID, cond); err != nil {
+			return err
+		}
+		res.VersionID, err = addVersion(ctx, tx, objectID, versioning, &newManifest, v)
+		return err
+	})
+	return copied, res, err
+}
+
+// ErrCopyFromDeleteMarker means a copy named a delete marker as its source.
+var ErrCopyFromDeleteMarker = errors.New("ledger: copy source is a delete marker")
+
+// GetObjectTags returns a version's tags (the current version when versionID is empty).
+func (l *Ledger) GetObjectTags(ctx context.Context, bucket, key, versionID string) (map[string]string, string, error) {
+	o, err := l.GetObject(ctx, bucket, key, versionID)
+	if err != nil {
+		if o != nil && o.IsDeleteMarker && versionID != "" {
+			return nil, "", ErrCopyFromDeleteMarker
+		}
+		return nil, "", err
+	}
+	return o.Tags, o.VersionID, nil
+}
+
+// SetObjectTags replaces a version's tags and returns the version ID.
+func (l *Ledger) SetObjectTags(ctx context.Context, bucket, key, versionID string, tags map[string]string) (string, error) {
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	cond := "v.id = o.current_version_id"
+	args := []any{bucket, key, tags}
+	if versionID != "" {
+		cond = "v.version_id = $4"
+		args = append(args, versionID)
+	}
+	var vid string
+	err := l.pool.QueryRow(ctx, `UPDATE object_versions v SET tags = $3
+		FROM objects o JOIN buckets b ON b.id = o.bucket_id
+		WHERE v.object_id = o.id AND b.name = $1 AND o.key = $2 AND NOT v.is_delete_marker AND `+cond+`
+		RETURNING v.version_id`, args...).Scan(&vid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, berr := l.HeadBucket(ctx, bucket); berr != nil {
+			return "", berr
+		}
+		if versionID != "" {
+			return "", ErrNoSuchVersion
+		}
+		return "", ErrNoSuchKey
+	}
+	return vid, err
+}
+
+// BucketTags returns a bucket's tags; nil means none were ever set.
+func (l *Ledger) BucketTags(ctx context.Context, bucket string) (map[string]string, error) {
+	var tags map[string]string
+	err := l.pool.QueryRow(ctx, "SELECT tags FROM buckets WHERE name = $1", bucket).Scan(&tags)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNoSuchBucket
+	}
+	return tags, err
+}
+
+// SetBucketTags replaces (nil deletes) a bucket's tags.
+func (l *Ledger) SetBucketTags(ctx context.Context, bucket string, tags map[string]string) error {
+	tag, err := l.pool.Exec(ctx, "UPDATE buckets SET tags = $2 WHERE name = $1", bucket, tags)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNoSuchBucket
+	}
+	return err
 }
 
 // DeleteObject deletes key following S3 semantics. Without a versionID it

@@ -89,7 +89,7 @@ func TestBuckets(t *testing.T) {
 	if _, err := l.DeleteObject(ctx, "b1", "k", ""); err != nil {
 		t.Fatal(err)
 	}
-	up, err := l.CreateUpload(ctx, "b1", "u", nil, "")
+	up, err := l.CreateUpload(ctx, "b1", "u", Upload{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,10 +266,10 @@ func TestMultipart(t *testing.T) {
 	l := newTestLedger(t)
 	ctx := context.Background()
 	_ = l.CreateBucket(ctx, "m", 0)
-	if _, err := l.CreateUpload(ctx, "nope", "k", nil, ""); !errors.Is(err, ErrNoSuchBucket) {
+	if _, err := l.CreateUpload(ctx, "nope", "k", Upload{}); !errors.Is(err, ErrNoSuchBucket) {
 		t.Fatalf("want ErrNoSuchBucket, got %v", err)
 	}
-	up, err := l.CreateUpload(ctx, "m", "k", map[string]string{"content-type": "text/x"}, "crc32")
+	up, err := l.CreateUpload(ctx, "m", "k", Upload{Headers: map[string]string{"content-type": "text/x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,16 +298,16 @@ func TestMultipart(t *testing.T) {
 	}
 
 	cp := func(n int) CompletePart { return CompletePart{Number: n, ETag: fmt.Sprintf("%032x", n)} }
-	if _, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(2), cp(1)}, Condition{}); !errors.Is(err, ErrInvalidPartOrder) {
+	if _, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(2), cp(1)}, Condition{}, nil); !errors.Is(err, ErrInvalidPartOrder) {
 		t.Fatalf("want ErrInvalidPartOrder, got %v", err)
 	}
-	if _, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(1), {Number: 2, ETag: "bad"}}, Condition{}); !errors.Is(err, ErrInvalidPart) {
+	if _, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(1), {Number: 2, ETag: "bad"}}, Condition{}, nil); !errors.Is(err, ErrInvalidPart) {
 		t.Fatalf("want ErrInvalidPart, got %v", err)
 	}
-	if _, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(2), cp(3)}, Condition{}); !errors.Is(err, ErrEntityTooSmall) {
+	if _, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(2), cp(3)}, Condition{}, nil); !errors.Is(err, ErrEntityTooSmall) {
 		t.Fatalf("want ErrEntityTooSmall, got %v", err)
 	}
-	etag, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(1), cp(2)}, Condition{})
+	etag, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(1), cp(2)}, Condition{}, nil)
 	if err != nil || etag[len(etag)-3:] != `-2"` {
 		t.Fatalf("complete: %s %v", etag, err)
 	}
@@ -318,7 +318,7 @@ func TestMultipart(t *testing.T) {
 	if refs(t, l, big) != 1 || refs(t, l, "tail") != 1 || refs(t, l, "unused") != 0 {
 		t.Fatalf("refs after complete big=%d tail=%d unused=%d", refs(t, l, big), refs(t, l, "tail"), refs(t, l, "unused"))
 	}
-	if again, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(1), cp(2)}, Condition{}); err != nil || again != etag {
+	if again, _, err := l.CompleteUpload(ctx, "m", "k", up, []CompletePart{cp(1), cp(2)}, Condition{}, nil); err != nil || again != etag {
 		t.Fatalf("retried complete: %s %v", again, err)
 	}
 	if err := l.PutPart(ctx, "m", "k", up, part(9, "late")); !errors.Is(err, ErrNoSuchUpload) {
@@ -328,7 +328,7 @@ func TestMultipart(t *testing.T) {
 		t.Fatalf("completed upload still listed: %+v", ups)
 	}
 
-	up2, _ := l.CreateUpload(ctx, "m", "k2", nil, "")
+	up2, _ := l.CreateUpload(ctx, "m", "k2", Upload{})
 	_ = l.PutPart(ctx, "m", "k2", up2, part(1, "abort-me"))
 	if err := l.AbortUpload(ctx, "m", "k2", up2); err != nil {
 		t.Fatal(err)

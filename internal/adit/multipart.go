@@ -24,17 +24,37 @@ func (s *Server) createUpload(req *request) error {
 	if err != nil {
 		return err
 	}
+	if aerr := checkCannedACL(req.r); aerr != nil {
+		return aerr
+	}
+	up := ledger.Upload{Headers: headers}
+	if v := req.r.Header.Get("X-Amz-Tagging"); v != "" {
+		var aerr *apiError
+		if up.Tags, aerr = parseTagHeader(v, maxObjectTags); aerr != nil {
+			return aerr
+		}
+	}
 	algo := strings.ToLower(req.r.Header.Get("X-Amz-Checksum-Algorithm"))
 	if _, ok := checksumAlgorithms[algo]; algo != "" && !ok {
 		return errf(http.StatusBadRequest, "InvalidRequest", "Checksum algorithm %q is not supported", algo)
 	}
-	id, err := s.ledger.CreateUpload(req.r.Context(), req.bucket, req.key, headers, algo)
+	if algo != "" {
+		typ, aerr := checksumTypeFor(algo, req.r.Header.Get("X-Amz-Checksum-Type"))
+		if aerr != nil {
+			return aerr
+		}
+		up.ChecksumAlgorithm, up.ChecksumType = algo, typ
+	} else if req.r.Header.Get("X-Amz-Checksum-Type") != "" {
+		return errf(http.StatusBadRequest, "InvalidRequest", "The x-amz-checksum-type header can only be used with the x-amz-checksum-algorithm header.")
+	}
+	id, err := s.ledger.CreateUpload(req.r.Context(), req.bucket, req.key, up)
 	if err != nil {
 		return err
 	}
 	s.emit("upload.created", map[string]any{"bucket": req.bucket, "key": req.key, "upload_id": id})
 	if algo != "" {
 		req.w.Header().Set("x-amz-checksum-algorithm", strings.ToUpper(algo))
+		req.w.Header().Set("x-amz-checksum-type", up.ChecksumType)
 	}
 	s.writeXML(req, http.StatusOK, initiateResult{Xmlns: s3Namespace, Bucket: req.bucket, Key: req.key, UploadID: id})
 	return nil
@@ -54,14 +74,15 @@ func (s *Server) uploadPart(req *request, uploadID string) error {
 		return err
 	}
 	// Fail fast before reading the body.
-	if _, err := s.ledger.GetUpload(req.r.Context(), req.bucket, req.key, uploadID); err != nil {
+	up, err := s.ledger.GetUpload(req.r.Context(), req.bucket, req.key, uploadID)
+	if err != nil {
 		return err
 	}
 	bucket, err := s.ledger.HeadBucket(req.r.Context(), req.bucket)
 	if err != nil {
 		return err
 	}
-	in, err := s.ingest(req, maxPutSize, bucket)
+	in, err := s.ingest(req, maxPutSize, bucket, up.ChecksumAlgorithm)
 	if err != nil {
 		return err
 	}
@@ -92,12 +113,36 @@ type completeRequest struct {
 }
 
 type completeResult struct {
-	XMLName  xml.Name `xml:"CompleteMultipartUploadResult"`
-	Xmlns    string   `xml:"xmlns,attr"`
-	Location string   `xml:"Location"`
-	Bucket   string   `xml:"Bucket"`
-	Key      string   `xml:"Key"`
-	ETag     string   `xml:"ETag"`
+	XMLName           xml.Name `xml:"CompleteMultipartUploadResult"`
+	Xmlns             string   `xml:"xmlns,attr"`
+	Location          string   `xml:"Location"`
+	Bucket            string   `xml:"Bucket"`
+	Key               string   `xml:"Key"`
+	ETag              string   `xml:"ETag"`
+	ChecksumCRC32     string   `xml:"ChecksumCRC32,omitempty"`
+	ChecksumCRC32C    string   `xml:"ChecksumCRC32C,omitempty"`
+	ChecksumCRC64NVME string   `xml:"ChecksumCRC64NVME,omitempty"`
+	ChecksumSHA1      string   `xml:"ChecksumSHA1,omitempty"`
+	ChecksumSHA256    string   `xml:"ChecksumSHA256,omitempty"`
+	ChecksumType      string   `xml:"ChecksumType,omitempty"`
+}
+
+func (c *completeResult) setChecksum(algo, value, typ string) {
+	switch algo {
+	case "crc32":
+		c.ChecksumCRC32 = value
+	case "crc32c":
+		c.ChecksumCRC32C = value
+	case "crc64nvme":
+		c.ChecksumCRC64NVME = value
+	case "sha1":
+		c.ChecksumSHA1 = value
+	case "sha256":
+		c.ChecksumSHA256 = value
+	default:
+		return
+	}
+	c.ChecksumType = typ
 }
 
 func (s *Server) completeUpload(req *request, uploadID string) error {
@@ -116,16 +161,29 @@ func (s *Server) completeUpload(req *request, uploadID string) error {
 	for i, p := range in.Parts {
 		parts[i] = ledger.CompletePart{Number: p.PartNumber, ETag: p.ETag}
 	}
-	etag, res, err := s.ledger.CompleteUpload(req.r.Context(), req.bucket, req.key, uploadID, parts, writeCondition(req.r))
+	combine := func(u ledger.Upload, ps []ledger.PartChecksum) (string, error) {
+		v, aerr := multipartChecksum(u.ChecksumAlgorithm, u.ChecksumType, ps)
+		if aerr != nil {
+			return "", aerr
+		}
+		// A client-supplied full-object checksum must match.
+		if want := req.r.Header.Get("X-Amz-Checksum-" + u.ChecksumAlgorithm); want != "" && u.ChecksumType == checksumFullObject && want != v {
+			return "", errBadDigest
+		}
+		return v, nil
+	}
+	etag, res, err := s.ledger.CompleteUpload(req.r.Context(), req.bucket, req.key, uploadID, parts, writeCondition(req.r), combine)
 	if err != nil {
 		return err
 	}
 	s.emit("upload.completed", map[string]any{"bucket": req.bucket, "key": req.key, "upload_id": uploadID, "parts": len(parts), "version_id": res.VersionID})
 	setWriteVersionHeader(req.w.Header(), res.Versioning, res.VersionID)
-	s.writeXML(req, http.StatusOK, completeResult{
+	out := completeResult{
 		Xmlns: s3Namespace, Location: "/" + req.bucket + "/" + uriEncode(req.key, false),
 		Bucket: req.bucket, Key: req.key, ETag: etag,
-	})
+	}
+	out.setChecksum(res.ChecksumAlgorithm, res.ChecksumValue, res.ChecksumType)
+	s.writeXML(req, http.StatusOK, out)
 	return nil
 }
 

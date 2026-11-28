@@ -28,8 +28,21 @@ type Upload struct {
 	Key               string
 	Headers           map[string]string
 	ChecksumAlgorithm string
+	ChecksumType      string // COMPOSITE or FULL_OBJECT when ChecksumAlgorithm is set
+	Tags              map[string]string
 	Initiated         time.Time
 }
+
+// PartChecksum is a stored part as seen by a checksum combiner.
+type PartChecksum struct {
+	Number   int
+	Size     int64
+	Checksum string // base64, as sent by the client for that part
+}
+
+// ChecksumFunc computes an upload's final checksum from its parts (in
+// order), or returns an S3 error. It runs inside the Complete transaction.
+type ChecksumFunc func(u Upload, parts []PartChecksum) (value string, err error)
 
 // Part is an uploaded part.
 type Part struct {
@@ -48,15 +61,20 @@ type CompletePart struct {
 	ETag   string
 }
 
-// CreateUpload starts a multipart upload.
-func (l *Ledger) CreateUpload(ctx context.Context, bucket, key string, headers map[string]string, checksumAlgorithm string) (string, error) {
-	if headers == nil {
-		headers = map[string]string{}
+// CreateUpload starts a multipart upload. Only Headers, Tags,
+// ChecksumAlgorithm and ChecksumType of u are used.
+func (l *Ledger) CreateUpload(ctx context.Context, bucket, key string, u Upload) (string, error) {
+	if u.Headers == nil {
+		u.Headers = map[string]string{}
+	}
+	if u.Tags == nil {
+		u.Tags = map[string]string{}
 	}
 	id := newID()
 	tag, err := l.pool.Exec(ctx, `
-		INSERT INTO multipart_uploads (upload_id, bucket_id, key, headers, checksum_algorithm)
-		SELECT $1, id, $3, $4, NULLIF($5, '') FROM buckets WHERE name = $2`, id, bucket, key, headers, checksumAlgorithm)
+		INSERT INTO multipart_uploads (upload_id, bucket_id, key, headers, checksum_algorithm, checksum_type, tags)
+		SELECT $1, id, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7 FROM buckets WHERE name = $2`,
+		id, bucket, key, u.Headers, u.ChecksumAlgorithm, u.ChecksumType, u.Tags)
 	if err == nil && tag.RowsAffected() == 0 {
 		return "", ErrNoSuchBucket
 	}
@@ -73,10 +91,10 @@ func lockUpload(ctx context.Context, tx pgx.Tx, bucket, key, uploadID string, ex
 	var bucketID int64
 	var algo *string
 	err := tx.QueryRow(ctx, `
-		SELECT u.bucket_id, u.headers, u.checksum_algorithm, u.created_at
+		SELECT u.bucket_id, u.headers, u.checksum_algorithm, coalesce(u.checksum_type, ''), u.tags, u.created_at
 		FROM multipart_uploads u JOIN buckets b ON b.id = u.bucket_id
 		WHERE u.upload_id = $1 AND b.name = $2 AND u.key = $3 AND u.completed_at IS NULL `+lock, uploadID, bucket, key).
-		Scan(&bucketID, &u.Headers, &algo, &u.Initiated)
+		Scan(&bucketID, &u.Headers, &algo, &u.ChecksumType, &u.Tags, &u.Initiated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM buckets WHERE name = $1)", bucket).Scan(&exists); err == nil && !exists {
@@ -155,7 +173,10 @@ func normETag(s string) string { return strings.Trim(strings.TrimSpace(s), `"`) 
 // CompleteUpload assembles the named parts into a new object version. The
 // object's manifest is the concatenation of the parts' manifests; the ETag is
 // the MD5 of the parts' binary MD5s, suffixed with the part count.
-func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID string, list []CompletePart, cond Condition) (etag string, res WriteResult, err error) {
+//
+// checksum, if non-nil, computes the object's checksum from the parts' checksums.
+func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID string, list []CompletePart, cond Condition,
+	checksum ChecksumFunc) (etag string, res WriteResult, err error) {
 	err = pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
 		u, bucketID, err := lockUpload(ctx, tx, bucket, key, uploadID, true)
 		if errors.Is(err, ErrNoSuchUpload) {
@@ -181,8 +202,10 @@ func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID strin
 			manifest int64
 			size     int64
 			etag     string
+			checksum string
 		}
-		rows, err := tx.Query(ctx, "SELECT part_number, manifest_id, size, etag FROM multipart_parts WHERE upload_id = $1", uploadID)
+		rows, err := tx.Query(ctx, `SELECT part_number, manifest_id, size, etag, coalesce(checksum_value, '')
+			FROM multipart_parts WHERE upload_id = $1`, uploadID)
 		if err != nil {
 			return err
 		}
@@ -190,7 +213,7 @@ func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID strin
 		for rows.Next() {
 			var n int
 			var s stored
-			if err := rows.Scan(&n, &s.manifest, &s.size, &s.etag); err != nil {
+			if err := rows.Scan(&n, &s.manifest, &s.size, &s.etag, &s.checksum); err != nil {
 				return err
 			}
 			have[n] = s
@@ -203,6 +226,7 @@ func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID strin
 		var nuggets []NuggetRef
 		var size int64
 		sizes := make([]int64, 0, len(list))
+		sums := make([]PartChecksum, 0, len(list))
 		for i := 1; i < len(list); i++ {
 			if list[i].Number <= list[i-1].Number {
 				return ErrInvalidPartOrder
@@ -228,6 +252,14 @@ func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID strin
 			nuggets = append(nuggets, refs...)
 			size += s.size
 			sizes = append(sizes, s.size)
+			sums = append(sums, PartChecksum{Number: cp.Number, Size: s.size, Checksum: s.checksum})
+		}
+		var sumValue string
+		if checksum != nil && u.ChecksumAlgorithm != "" {
+			if sumValue, err = checksum(u, sums); err != nil {
+				return err
+			}
+			res.ChecksumAlgorithm, res.ChecksumValue, res.ChecksumType = u.ChecksumAlgorithm, sumValue, u.ChecksumType
 		}
 		etag = fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(md5s.Sum(nil)), len(list))
 
@@ -258,7 +290,8 @@ func (l *Ledger) CompleteUpload(ctx context.Context, bucket, key, uploadID strin
 			return err
 		}
 		res.VersionID, err = addVersion(ctx, tx, objectID, versioning, &manifestID, Version{
-			Size: size, ETag: etag, Headers: u.Headers, PartsCount: len(list), PartSizes: sizes,
+			Size: size, ETag: etag, Headers: u.Headers, Tags: u.Tags, PartsCount: len(list), PartSizes: sizes,
+			ChecksumAlgorithm: res.ChecksumAlgorithm, ChecksumValue: sumValue, ChecksumType: res.ChecksumType,
 		})
 		if err != nil {
 			return err
