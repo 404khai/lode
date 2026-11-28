@@ -505,7 +505,7 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 	switch total := held + len(written); {
 	case total < quorum:
 		c.writes.WithLabelValues("failed").Inc()
-		return written, fmt.Errorf("%w: %d of %d replicas stored (need %d): %w", ErrInsufficientReplicas, total, replicas, quorum, errors.Join(errs...))
+		return written, fmt.Errorf("%w: %d of %d replicas stored (need %d)%s", ErrInsufficientReplicas, total, replicas, quorum, joinErrs(errs))
 	case total < replicas:
 		c.writes.WithLabelValues("degraded").Inc()
 		c.opts.Events.Publish(events.Event{Type: "nugget.under_replicated", Component: "adit",
@@ -517,6 +517,15 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 		c.writes.WithLabelValues("full").Inc()
 	}
 	return written, nil
+}
+
+// joinErrs renders underlying errors as ": a; b", or "" when there are none
+// (e.g. no vein was available to try).
+func joinErrs(errs []error) string {
+	if len(errs) == 0 {
+		return " (no vein available)"
+	}
+	return ": " + errors.Join(errs...).Error()
 }
 
 // Read returns ref's bytes: from the best replica, or for an erasure-coded
