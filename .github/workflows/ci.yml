@@ -64,12 +64,16 @@ jobs:
         run: make erasure
       - name: Lifecycle rules (skewed clock) and quotas
         run: make lifecycle
+      - name: Record Lantern's live stream
+        run: make lantern-watch
       - name: Chaos — kill a vein, corrupt another, heal with zero client errors
         run: make chaos
+      - name: Lantern showed the failure, repair flows and recovery
+        run: make lantern-check
       - name: Metrics exported
         run: curl -sf localhost:9090/metrics | grep -E 'lode_adit_requests_total|lode_cluster_veins_available'
       - if: failure()
-        run: docker compose -f deploy/docker-compose.yml logs adit vein1 vein2 vein3 vein4 vein5 vein6
+        run: docker compose -f deploy/docker-compose.yml logs adit lantern vein1 vein2 vein3 vein4 vein5 vein6
       - if: always()
         run: make down
 
@@ -106,3 +110,15 @@ jobs:
         run: make s3compat
       - if: failure()
         run: cat "$RUNNER_TEMP"/*.log
+
+  lantern-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web/lantern
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "24", cache: npm, cache-dependency-path: web/lantern/package-lock.json }
+      - run: npm ci --no-fund --no-audit
+      - run: npm run build   # typechecks, then bundles

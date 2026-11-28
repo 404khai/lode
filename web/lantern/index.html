@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="./logo.webp" />
+    <title>Lantern · Lode</title>
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand"><img src="./logo.webp" alt="" /><div><b>Lantern</b><span>Lode cluster explorer</span></div></div>
+      <div id="status" class="status" data-status="connecting"><i></i><span>connecting…</span></div>
+      <div id="totals" class="totals"></div>
+    </header>
+    <main class="grid">
+      <div class="col">
+      <section class="card topo-card">
+        <h2>Topology <small>zones → hosts → veins</small></h2>
+        <div class="legend">
+          <span data-s="healthy">healthy</span><span data-s="suspect">suspect</span><span data-s="down">down</span><span data-s="draining">draining</span>
+          <span class="flow-key">repair copy</span>
+        </div>
+        <svg id="topology"></svg>
+      </section>
+      <section class="card">
+        <h2>Object</h2>
+        <form id="object-form" class="row">
+          <input name="bucket" placeholder="bucket" required />
+          <input name="key" placeholder="key" required />
+          <button>Locate</button>
+        </form>
+        <div id="object"></div>
+      </section>
+      <section class="card">
+        <h2>Ask Foreman <small>runs Foreman's MCP tools</small></h2>
+        <form id="foreman-form">
+          <div class="row"><select name="tool" id="tool"></select><button>Run</button></div>
+          <textarea name="args" id="args" rows="3" spellcheck="false">{}</textarea>
+        </form>
+        <div id="foreman-out"></div>
+      </section>
+      </div>
+      <div class="col">
+      <section class="card">
+        <h2>Redundancy</h2>
+        <div class="kpis" id="kpis"></div>
+        <h3>Under-replicated nuggets</h3>
+        <svg id="trend" class="trend"></svg>
+        <h3>Fault tolerance by bucket <small>nuggets that survive N more vein losses</small></h3>
+        <div id="heatmap"></div>
+      </section>
+      <section class="card timeline-card">
+        <h2>Events <small id="event-count"></small></h2>
+        <ol id="timeline"></ol>
+          <p id="timeline-empty" class="empty">Waiting for cluster events: vein state changes, repairs, scrubs and GC appear here as they happen.</p>
+      </section>
+      </div>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -139,14 +139,16 @@ func (l *Ledger) RetryRepair(ctx context.Context, id int64, owner, msg string, b
 // RepairStats summarises the repair queue and redundancy.
 type RepairStats struct {
 	Queued, Leased, Lost int64
+	Runnable             int64 // queued jobs not waiting out a backoff (e.g. for capacity)
 	UnderReplicated      int64 // referenced nuggets with less fault tolerance on healthy veins than wanted
 }
 
 func (l *Ledger) RepairStats(ctx context.Context) (RepairStats, error) {
 	var s RepairStats
 	err := l.pool.QueryRow(ctx, `SELECT
-		count(*) FILTER (WHERE state = 'queued'), count(*) FILTER (WHERE state = 'leased'), count(*) FILTER (WHERE state = 'lost')
-		FROM repair_jobs`).Scan(&s.Queued, &s.Leased, &s.Lost)
+		count(*) FILTER (WHERE state = 'queued'), count(*) FILTER (WHERE state = 'leased'), count(*) FILTER (WHERE state = 'lost'),
+		count(*) FILTER (WHERE state = 'queued' AND not_before <= now())
+		FROM repair_jobs`).Scan(&s.Queued, &s.Leased, &s.Lost, &s.Runnable)
 	if err != nil {
 		return s, err
 	}

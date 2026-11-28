@@ -86,6 +86,18 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
 
+  # Cluster explorer on http://localhost:8080 (sign in with an access key / secret).
+  lantern:
+    build:
+      context: ..
+      dockerfile: deploy/lantern.Dockerfile
+    command: ["-config", "/etc/lode/adit.yaml", "-listen", ":8080"]
+    volumes:
+      - ./adit.example.yaml:/etc/lode/adit.yaml:ro
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
 volumes:
   pgdata:
   vein1:

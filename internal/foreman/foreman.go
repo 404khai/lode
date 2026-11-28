@@ -420,7 +420,8 @@ func layoutName(k, m, replication int) string {
 	return fmt.Sprintf("replicated x%d", max(replication, 1))
 }
 
-func (f *Foreman) locate(ctx context.Context, in LocateInput) (ObjectLocation, error) {
+// Locate reports where an object version's nuggets and shards live.
+func (f *Foreman) Locate(ctx context.Context, in LocateInput) (ObjectLocation, error) {
 	out := ObjectLocation{Bucket: in.Bucket, Key: in.Key}
 	o, err := f.opts.Ledger.GetObject(ctx, in.Bucket, in.Key, in.VersionID)
 	if err != nil {
@@ -479,7 +480,7 @@ func (f *Foreman) locate(ctx context.Context, in LocateInput) (ObjectLocation, e
 }
 
 func (f *Foreman) locateObject(ctx context.Context, _ *mcp.CallToolRequest, in LocateInput) (*mcp.CallToolResult, ObjectLocation, error) {
-	out, err := f.locate(ctx, in)
+	out, err := f.Locate(ctx, in)
 	if err != nil {
 		return nil, out, err
 	}
@@ -925,7 +926,7 @@ func (f *Foreman) registerResources() {
 			if !ok {
 				return nil, mcp.ResourceNotFoundError(req.Params.URI)
 			}
-			out, err := f.locate(ctx, LocateInput{Bucket: bucket, Key: key})
+			out, err := f.Locate(ctx, LocateInput{Bucket: bucket, Key: key})
 			if err != nil {
 				return nil, mcp.ResourceNotFoundError(req.Params.URI)
 			}

@@ -97,6 +97,7 @@ func run() error {
 
 	bus := events.NewBus()
 	led := ledger.New(pool)
+	go led.ForwardEvents(ctx, bus, log)
 	queueRepair := func(ctx context.Context, id nugget.ID, reason, vein string) {
 		if err := led.EnqueueRepair(context.WithoutCancel(ctx), id, reason, vein); err != nil {
 			log.Error("queue repair", "nugget", id.String(), "reason", reason, "err", err)

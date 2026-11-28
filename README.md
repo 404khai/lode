@@ -54,6 +54,14 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
   than silently stored in plaintext), bucket policies, CORS, object lock, virtual-hosted addressing.
   Compatibility is tracked in `test/s3compat/tests.txt`.
 
+## Lantern (cluster explorer)
+
+`make up` serves Lantern on http://localhost:8080 (sign in with an access key and secret). It shows
+zones → hosts → veins coloured by health with capacity, repair copies animated between veins, a
+per-bucket fault-tolerance heatmap with the under-replicated trend, a live event timeline, an
+object's shard placement map, and an "Ask Foreman" panel that runs Foreman's MCP tools. Locally:
+`make lantern-ui && ./bin/lode-lantern -ui web/lantern/dist`.
+
 ## Agents (MCP)
 
 Foreman exposes the cluster to agents over MCP. Read-only by default; `-allow-write` adds

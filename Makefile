@@ -1,10 +1,10 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -s -w -X github.com/404khai/lode/internal/version.Version=$(VERSION) -X github.com/404khai/lode/internal/version.Commit=$(COMMIT)
-BINS    := lode lode-adit lode-vein lode-foreman
+BINS    := lode lode-adit lode-vein lode-foreman lode-lantern
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: build test lint proto up down e2e corruption dedup replication erasure lifecycle s3compat chaos
+.PHONY: build test lint proto up down e2e corruption dedup replication erasure lifecycle s3compat chaos lantern-ui lantern-watch lantern-check
 
 build:
 	@mkdir -p bin
@@ -49,3 +49,12 @@ s3compat:
 
 chaos:
 	test/e2e/chaos.sh
+
+lantern-ui:
+	cd web/lantern && npm ci --no-fund --no-audit && npm run build
+
+lantern-watch:
+	test/e2e/lantern.sh start
+
+lantern-check:
+	test/e2e/lantern.sh check
