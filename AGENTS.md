@@ -101,7 +101,7 @@ make up               # docker compose: postgres + 1 adit + 4 veins (foreman and
 make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
 make corruption       # corrupts a nugget on the compose vein and checks it is never served
 make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
-make replication      # kills a vein mid-upload, then reads with each vein down (VEIN_STOP/VEIN_START override the compose commands)
+make replication      # kills a vein mid-upload, then reads with each vein down (VEIN_STOP/VEIN_START with __N__ override the compose commands)
 make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against an Adit on :9000 (see test/s3compat/adit.yaml)
 make chaos            # kills/partitions veins while e2e runs
 ```

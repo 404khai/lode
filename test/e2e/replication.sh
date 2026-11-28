@@ -2,19 +2,19 @@
 # Phase 3 exit check: kill a vein in the middle of an upload (which must
 # still succeed), then read everything back with each vein down in turn.
 # Defaults drive the compose cluster; override VEIN_STOP / VEIN_START (with
-# {} for the vein number) to drive other setups.
+# __N__ for the vein number) to drive other setups.
 set -euo pipefail
 
 : "${LODE_ENDPOINT:=http://localhost:9000}"
 : "${VEINS:=1 2 3 4}"
-: "${VEIN_STOP:=docker compose -f deploy/docker-compose.yml kill vein{}}"
-: "${VEIN_START:=docker compose -f deploy/docker-compose.yml start vein{}}"
+: "${VEIN_STOP:=docker compose -f deploy/docker-compose.yml kill vein__N__}"
+: "${VEIN_START:=docker compose -f deploy/docker-compose.yml start vein__N__}"
 : "${SETTLE:=3}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-lode}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-lodesecret}"
 export AWS_DEFAULT_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true
 aws() { command aws --endpoint-url "$LODE_ENDPOINT" "$@"; }
-stop() { eval "${VEIN_STOP//\{\}/$1}" >/dev/null; }
-start() { eval "${VEIN_START//\{\}/$1}" >/dev/null; }
+stop() { eval "${VEIN_STOP//__N__/$1}" >/dev/null; }
+start() { eval "${VEIN_START//__N__/$1}" >/dev/null; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

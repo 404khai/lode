@@ -76,9 +76,9 @@ type Client struct {
 	mu      sync.RWMutex
 	members map[string]*member
 
-	rpcs       *prometheus.CounterVec
-	rpcLatency *prometheus.HistogramVec
-	writes     *prometheus.CounterVec
+	rpcs        *prometheus.CounterVec
+	rpcLatency  *prometheus.HistogramVec
+	writes      *prometheus.CounterVec
 	failovers   prometheus.Counter
 	bytesStored prometheus.Counter
 	available   prometheus.Gauge
