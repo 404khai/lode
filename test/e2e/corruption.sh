@@ -44,11 +44,14 @@ cmp -s "$work/obj" "$work/one" || { echo "FAIL: wrong bytes served with one corr
 echo "corruption: one corrupt replica (${holders[0]}) skipped, correct bytes served"
 
 for vol in $VEIN_VOLUMES; do corrupt "$vol" >/dev/null; done
+# Repair (triggered by the first corrupt read) may already have written a
+# fresh good copy; either way Lode must never serve wrong bytes.
 if aws s3 cp "s3://$bucket/obj" "$work/all" >/dev/null 2>"$work/err"; then
-  echo "FAIL: an object with every replica corrupt was served" >&2
-  exit 1
+  cmp -s "$work/obj" "$work/all" || { echo "FAIL: corrupt bytes were served" >&2; exit 1; }
+  echo "corruption: repair restored a good copy before every replica was corrupted; correct bytes served"
+else
+  grep -qiE "internal.?error|500" "$work/err" || { echo "FAIL: unexpected error: $(cat "$work/err")" >&2; exit 1; }
+  echo "corruption: every replica corrupt, read refused ($(head -c 100 "$work/err"))"
 fi
-grep -qiE "internal.?error|500" "$work/err" || { echo "FAIL: unexpected error: $(cat "$work/err")" >&2; exit 1; }
-echo "corruption: every replica corrupt, read refused ($(head -c 100 "$work/err"))"
 # The object is unrecoverable by design; delete it so repair stops trying.
 aws s3 rm "s3://$bucket/obj" >/dev/null && aws s3 rb "s3://$bucket" >/dev/null
