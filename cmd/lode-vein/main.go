@@ -129,7 +129,8 @@ func run() error {
 		return err
 	}
 	gs := grpc.NewServer(append(vein.IdentityInterceptors(id), grpc.MaxRecvMsgSize(4<<20))...)
-	lodev1.RegisterVeinServiceServer(gs, vein.NewServer(store, id))
+	vs := vein.NewServer(store, id)
+	lodev1.RegisterVeinServiceServer(gs, vs)
 	errc := make(chan error, 2)
 	go func() { errc <- gs.Serve(lis) }()
 	log.Info("vein serving", "listen", cfg.Vein.Listen, "advertise", advertise, "zone", cfg.Vein.Zone, "host", cfg.Vein.Host,
@@ -152,6 +153,7 @@ func run() error {
 			Store: store, Ledger: led, VeinID: id, Logger: log.With("component", "assay"), Registerer: reg,
 			BytesPerSecond: cfg.Vein.ScrubRate, Pause: cfg.Vein.ScrubPause,
 		})
+		vs.OnTriggerScrub(scrub.Trigger)
 		go scrub.Run(ctx)
 	}
 

@@ -25,9 +25,20 @@ type Server struct {
 	lodev1.UnimplementedVeinServiceServer
 	store *Store
 	id    string
+	scrub func() bool
 }
 
 func NewServer(store *Store, id string) *Server { return &Server{store: store, id: id} }
+
+// OnTriggerScrub sets the hook TriggerScrub calls; it reports whether a pass started.
+func (s *Server) OnTriggerScrub(f func() bool) { s.scrub = f }
+
+func (s *Server) TriggerScrub(context.Context, *lodev1.TriggerScrubRequest) (*lodev1.TriggerScrubResponse, error) {
+	if s.scrub == nil {
+		return nil, status.Error(codes.FailedPrecondition, "scrubbing is disabled on this vein")
+	}
+	return &lodev1.TriggerScrubResponse{Started: s.scrub()}, nil
+}
 
 func toStatus(err error) error {
 	switch {

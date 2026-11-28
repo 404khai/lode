@@ -423,6 +423,20 @@ func (c *Client) getOnce(ctx context.Context, veinID string, id nugget.ID, lengt
 	return buf, nil
 }
 
+// TriggerScrub asks a vein to start an Assay pass now.
+func (c *Client) TriggerScrub(ctx context.Context, veinID string) (started bool, err error) {
+	m, err := c.member(veinID)
+	if err != nil {
+		return false, err
+	}
+	start := time.Now()
+	defer func() { c.observe(ctx, veinID, "TriggerScrub", start, err) }()
+	ctx, cancel := context.WithTimeout(ctx, c.opts.RPCTimeout)
+	defer cancel()
+	resp, err := m.client.TriggerScrub(ctx, &lodev1.TriggerScrubRequest{})
+	return resp.GetStarted(), err
+}
+
 // Delete removes id from one vein.
 func (c *Client) Delete(ctx context.Context, veinID string, id nugget.ID) (err error) {
 	m, err := c.member(veinID)

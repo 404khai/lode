@@ -72,6 +72,20 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
 
+  # MCP server for agents: streamable HTTP on :9100, read-only by default.
+  # Clients send "Authorization: Bearer lode:lodesecret". Add -allow-write
+  # to the command to enable drain_vein, set_quota and the other write tools.
+  foreman:
+    build:
+      context: ..
+      args: { BIN: lode-foreman }
+    command: ["-config", "/etc/lode/adit.yaml", "-http", ":9100"]
+    volumes:
+      - ./adit.example.yaml:/etc/lode/adit.yaml:ro
+    ports: ["9100:9100"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
 volumes:
   pgdata:
   vein1:

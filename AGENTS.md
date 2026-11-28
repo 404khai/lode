@@ -97,7 +97,7 @@ make build            # all binaries
 make test             # unit tests (go test ./... -race); set LODE_TEST_DSN=postgres://... to run Ledger/Adit integration tests
 make lint             # golangci-lint + buf lint
 make proto            # regenerate gRPC code (buf generate)
-make up               # docker compose: postgres + 1 adit + 6 veins in 2 zones (foreman and lantern join in later phases)
+make up               # docker compose: postgres + 1 adit + 6 veins in 2 zones + foreman (MCP, :9100); lantern joins later
 make e2e              # aws CLI e2e suite against `make up` (LODE_ENDPOINT overrides the target)
 make corruption       # corrupts a nugget on the compose vein and checks it is never served
 make dedup            # uploads one file twice and checks it is stored once (DEDUP_SIZE_MB, default 1024)
@@ -106,6 +106,7 @@ make s3compat         # ceph/s3-tests cases in test/s3compat/tests.txt against a
 make erasure          # 4+2 bucket on 6 veins: reads with each pair of veins down
 make lifecycle        # lifecycle rules under a +40-day skewed clock, and QuotaExceeded on overrun
 make chaos            # kills a vein and corrupts another under read load; waits for full redundancy, zero client errors
+./bin/lode-foreman    # MCP server: stdio by default, -http :9100, -allow-write for write tools
 ./bin/lode veins      # operator CLI (LODE_LEDGER_DSN): veins, vein drain|undrain|remove, repairs, bucket create -ec K+M, quota set|list
 ```
 
@@ -183,13 +184,13 @@ Agent-native surface. Read-only tools are default; mutating tools require `--all
 - Resources: `lode://cluster`, `lode://veins/{id}`, `lode://buckets/{name}`, `lode://objects/{bucket}/{key}`, `lode://repairs`.
 - Tools:
   - `cluster_status`, `list_veins`, `vein_detail`, `disk_health`
-  - `locate_object` (which veins/disks hold each shard, redundancy left)
+  - `locate_object` (which veins/disks hold each shard, redundancy left), `objects_at_risk` (what a vein's loss would endanger)
   - `list_repairs`, `explain_repair` (why this job exists, ETA)
   - `bucket_usage`, `list_lifecycle_rules`, `simulate_placement`
   - write: `drain_vein`, `trigger_scrub`, `set_quota`, `put_lifecycle_rule`, `retry_repair`
 - Transports: stdio and streamable HTTP; auth via the same access keys.
 - Every tool returns structured JSON plus a one-line human summary.
-- **Exit:** an agent can answer "which objects are at risk if vein-3 dies right now?" and safely drain a vein end to end, verified in an MCP integration test.
+- **Exit:** an agent can answer "which objects are at risk if vein-3 dies right now?" and safely drain a vein end to end, verified in an MCP integration test. ✅
 
 ### Phase 8 — Lantern (cluster explorer)
 - Live topology: zones → hosts → veins → disks, coloured by health; capacity bars.
