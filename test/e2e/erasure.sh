@@ -9,21 +9,31 @@ set -euo pipefail
 : "${VEIN_STOP:=docker compose -f deploy/docker-compose.yml kill vein__N__}"
 : "${VEIN_START:=docker compose -f deploy/docker-compose.yml start vein__N__}"
 : "${SETTLE:=3}"
+: "${LODE_METRICS:=http://localhost:9090/metrics}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-lode}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-lodesecret}"
 export AWS_DEFAULT_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true
 aws() { command aws --endpoint-url "$LODE_ENDPOINT" "$@"; }
+metric() { curl -sf "$LODE_METRICS" | awk -v m="$1" '$1 == m {printf "%d", $2; f=1} END {if (!f) print -1}'; }
+wait_for() { # metric op value: wait up to 120s
+  for _ in $(seq 1 120); do [ "$(metric "$1")" "$2" "$3" ] && return 0; sleep 1; done
+  echo "FAIL: timed out waiting for $1 $2 $3 (now $(metric "$1"))" >&2; exit 1
+}
 stop() { eval "${VEIN_STOP//__N__/$1}" >/dev/null; }
 start() { eval "${VEIN_START//__N__/$1}" >/dev/null; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 bucket="ec-$(date +%s)"
+# Two-loss tolerance assumes full redundancy: all veins up before writing,
+# and any degraded write repaired before veins are killed.
+wait_for lode_cluster_veins_available -ge 6
 eval "$LODE bucket create $bucket -ec 4+2"
 head -c $((60 * 1024 * 1024)) /dev/urandom >"$work/big"
 head -c 5000 /dev/urandom >"$work/small"
 aws s3 cp "$work/big" "s3://$bucket/big" >/dev/null
 aws s3 cp "$work/small" "s3://$bucket/small" >/dev/null
-echo "erasure: wrote 60 MiB + 5 KB to a 4+2 bucket"
+wait_for lode_repair_under_replicated_nuggets -eq 0
+echo "erasure: wrote 60 MiB + 5 KB to a 4+2 bucket at full redundancy"
 
 for pair in "1 2" "3 6" "4 5"; do
   set -- $pair
@@ -35,6 +45,7 @@ for pair in "1 2" "3 6" "4 5"; do
   echo "  ok  reads with vein$1 and vein$2 down"
   start "$1"; start "$2"
   sleep "$SETTLE"
+  wait_for lode_cluster_veins_available -ge 6
 done
 aws s3 rm --recursive "s3://$bucket" >/dev/null && aws s3 rb "s3://$bucket" >/dev/null
 echo "erasure: all checks passed"
