@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -30,7 +31,7 @@ func (h *harness) addVein(zone string) *testVein {
 		h.t.Fatal(err)
 	}
 	v := &testVein{id: fmt.Sprintf("v%d", len(h.veins)+1), store: store, addr: lis.Addr().String()}
-	v.gs = grpc.NewServer()
+	v.gs = grpc.NewServer(vein.IdentityInterceptors(v.id)...)
 	lodev1.RegisterVeinServiceServer(v.gs, vein.NewServer(store, v.id))
 	go func() { _ = v.gs.Serve(lis) }()
 	h.t.Cleanup(func() { v.gs.Stop(); _ = store.Close() })
@@ -201,5 +202,41 @@ func TestRebalanceMovesAboutOneNth(t *testing.T) {
 		if got := h.expect(h.do("GET", fmt.Sprintf("/rebal/o%d", i), nil, nil), 200, ""); string(got) != fmt.Sprintf("object %d", i) {
 			t.Fatalf("o%d wrong after rebalance", i)
 		}
+	}
+}
+
+// A connection that drifts to another vein (address reuse after restarts)
+// must be refused, never trusted: v2 answering as v1 would record data on
+// the wrong vein.
+func TestMisaddressedVeinIsRefused(t *testing.T) {
+	h := newClusterHarness(t, 2, 1)
+	ctx := context.Background()
+	v1, v2 := h.veins[0], h.veins[1]
+	v1.stop()
+	v2.stop()
+	// v2 comes back listening on v1's old address.
+	lis, err := net.Listen("tcp", v1.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer(vein.IdentityInterceptors(v2.id)...)
+	lodev1.RegisterVeinServiceServer(gs, vein.NewServer(v2.store, v2.id))
+	go func() { _ = gs.Serve(lis) }()
+	defer gs.Stop()
+
+	data := []byte("must not land on the wrong vein")
+	id := nugget.Sum(data)
+	var err2 error
+	for range 20 { // wait for the reconnect
+		if err2 = h.cluster.Put(ctx, v1.id, id, data); err2 != nil && vein.IsWrongVein(err2) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !vein.IsWrongVein(err2) {
+		t.Fatalf("put addressed to v1 was not refused by v2: %v", err2)
+	}
+	if ok, _ := v2.store.Has(id); ok {
+		t.Fatal("v2 stored data addressed to v1")
 	}
 }

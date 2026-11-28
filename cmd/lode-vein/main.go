@@ -128,7 +128,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	gs := grpc.NewServer(grpc.MaxRecvMsgSize(4 << 20))
+	gs := grpc.NewServer(append(vein.IdentityInterceptors(id), grpc.MaxRecvMsgSize(4<<20))...)
 	lodev1.RegisterVeinServiceServer(gs, vein.NewServer(store, id))
 	errc := make(chan error, 2)
 	go func() { errc <- gs.Serve(lis) }()

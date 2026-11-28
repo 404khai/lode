@@ -67,7 +67,7 @@ func (v *testVein) restart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v.gs = grpc.NewServer()
+	v.gs = grpc.NewServer(vein.IdentityInterceptors(v.id)...)
 	lodev1.RegisterVeinServiceServer(v.gs, vein.NewServer(v.store, v.id))
 	go func() { _ = v.gs.Serve(lis) }()
 }
@@ -117,7 +117,7 @@ func newClusterHarness(t *testing.T, n, replication int) *harness {
 			t.Fatal(err)
 		}
 		v := &testVein{id: fmt.Sprintf("v%d", i+1), dir: dir, store: store, addr: lis.Addr().String()}
-		v.gs = grpc.NewServer()
+		v.gs = grpc.NewServer(vein.IdentityInterceptors(v.id)...)
 		lodev1.RegisterVeinServiceServer(v.gs, vein.NewServer(store, v.id))
 		go func() { _ = v.gs.Serve(lis) }()
 		if err := led.RegisterVein(ctx, ledger.VeinInfo{ID: v.id, Addr: v.addr, Zone: []string{"a", "b"}[i%2], Host: v.id}); err != nil {
