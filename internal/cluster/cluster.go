@@ -79,8 +79,9 @@ type Client struct {
 	rpcs       *prometheus.CounterVec
 	rpcLatency *prometheus.HistogramVec
 	writes     *prometheus.CounterVec
-	failovers  prometheus.Counter
-	available  prometheus.Gauge
+	failovers   prometheus.Counter
+	bytesStored prometheus.Counter
+	available   prometheus.Gauge
 }
 
 func New(opts Options) *Client {
@@ -118,6 +119,8 @@ func New(opts Options) *Client {
 			Help: "Nugget writes by outcome: full, degraded (quorum but not all replicas), failed."}, []string{"outcome"}),
 		failovers: f.NewCounter(prometheus.CounterOpts{Namespace: "lode", Subsystem: "cluster", Name: "read_failovers_total",
 			Help: "Reads that had to try another replica."}),
+		bytesStored: f.NewCounter(prometheus.CounterOpts{Namespace: "lode", Subsystem: "cluster", Name: "bytes_stored_total",
+			Help: "Nugget bytes sent to veins in successful puts (all replicas)."}),
 		available: f.NewGauge(prometheus.GaugeOpts{Namespace: "lode", Subsystem: "cluster", Name: "veins_available",
 			Help: "Veins currently available for placement."}),
 	}
@@ -233,16 +236,19 @@ func (c *Client) member(id string) (*member, error) {
 // or unhealthy, rather than something about one nugget.
 func transportFailure(err error) bool {
 	switch status.Code(err) {
-	case codes.Unavailable, codes.DeadlineExceeded, codes.Internal, codes.Unknown, codes.ResourceExhausted, codes.Canceled:
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Internal, codes.Unknown, codes.ResourceExhausted:
 		return true
 	}
 	return false
 }
 
-func (c *Client) observe(veinID, method string, start time.Time, err error) {
+// observe records an RPC outcome. A transport failure takes the vein out of
+// rotation briefly, unless the caller's own context ended first: a client
+// that hangs up says nothing about the vein.
+func (c *Client) observe(ctx context.Context, veinID, method string, start time.Time, err error) {
 	c.rpcs.WithLabelValues(veinID, method, status.Code(err).String()).Inc()
 	c.rpcLatency.WithLabelValues(method).Observe(time.Since(start).Seconds())
-	if err == nil || !transportFailure(err) {
+	if err == nil || !transportFailure(err) || ctx.Err() != nil {
 		return
 	}
 	c.mu.Lock()
@@ -265,7 +271,12 @@ func (c *Client) Put(ctx context.Context, veinID string, id nugget.ID, data []by
 		return err
 	}
 	start := time.Now()
-	defer func() { c.observe(veinID, "PutShard", start, err) }()
+	defer func() {
+		c.observe(ctx, veinID, "PutShard", start, err)
+		if err == nil {
+			c.bytesStored.Add(float64(len(data)))
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, c.opts.RPCTimeout)
 	defer cancel()
 	stream, err := m.client.PutShard(ctx)
@@ -305,7 +316,7 @@ func (c *Client) get(ctx context.Context, veinID string, id nugget.ID, length in
 	}
 	start := time.Now()
 	defer func() {
-		c.observe(veinID, "GetShard", start, err)
+		c.observe(ctx, veinID, "GetShard", start, err)
 		if err == nil {
 			c.mu.Lock()
 			d := time.Since(start)
@@ -354,7 +365,7 @@ func (c *Client) Delete(ctx context.Context, veinID string, id nugget.ID) (err e
 		return err
 	}
 	start := time.Now()
-	defer func() { c.observe(veinID, "DeleteShard", start, err) }()
+	defer func() { c.observe(ctx, veinID, "DeleteShard", start, err) }()
 	ctx, cancel := context.WithTimeout(ctx, c.opts.RPCTimeout)
 	defer cancel()
 	_, err = m.client.DeleteShard(ctx, &lodev1.DeleteShardRequest{Id: id[:]})

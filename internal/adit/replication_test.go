@@ -141,3 +141,21 @@ func TestReadFailsOverFromCorruptReplica(t *testing.T) {
 		t.Fatal("failover read returned wrong bytes")
 	}
 }
+
+// A client hanging up mid-upload must not take healthy veins out of rotation.
+func TestClientCancelDoesNotMarkVeinsDown(t *testing.T) {
+	h := newClusterHarness(t, 3, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	data := []byte("cancelled")
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if err := h.cluster.Put(ctx, v, nugget.Sum(data), data); err == nil {
+			t.Fatal("put with a cancelled context succeeded")
+		}
+	}
+	if n := len(h.cluster.Available()); n != 3 {
+		t.Fatalf("caller cancellation took veins out of rotation: %d available", n)
+	}
+	h.expect(h.do("PUT", "/cancel", nil, nil), 200, "")
+	h.expect(h.do("PUT", "/cancel/after", []byte("still writable"), nil), 200, "")
+}
