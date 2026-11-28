@@ -5,7 +5,7 @@
 set -euo pipefail
 
 : "${LODE_ENDPOINT:=http://localhost:9000}"
-: "${VEIN_VOLUMES:=lode_vein1 lode_vein2 lode_vein3 lode_vein4}"
+: "${VEIN_VOLUMES:=lode_vein1 lode_vein2 lode_vein3 lode_vein4 lode_vein5 lode_vein6}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-lode}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-lodesecret}"
 export AWS_DEFAULT_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true
 aws() { command aws --endpoint-url "$LODE_ENDPOINT" "$@"; }

@@ -115,6 +115,10 @@ func (s *Server) ingest(req *request, maxSize int64, bucket ledger.Bucket, defau
 // bytes. It returns the manifest entries, size and MD5.
 func (s *Server) storeStream(ctx context.Context, src io.Reader, bucket ledger.Bucket, sum *checksum) (*ingested, error) {
 	replicas, quorum := s.writePolicy(bucket)
+	placer, err := s.strategy(bucket)
+	if err != nil {
+		return nil, err
+	}
 	md5h := md5.New() // #nosec G401
 	hashers := []hash.Hash{md5h}
 	if sum != nil {
@@ -137,13 +141,24 @@ func (s *Server) storeStream(ctx context.Context, src io.Reader, bucket ledger.B
 			h.Write(data)
 		}
 		ref := ledger.NuggetRef{ID: nugget.Sum(data), Length: int64(len(data))}
-		existing, err := s.ledger.TouchNugget(ctx, ref, replicas)
+		layout, err := s.ledger.TouchNugget(ctx, ref, replicas, bucket.ECData, bucket.ECParity)
 		if err != nil {
 			return nil, err
 		}
-		written, serr := s.cluster.Store(ctx, ref.ID, data, existing, replicas, quorum)
-		// Record every copy that landed, even on failure, so Tailings can find it.
-		if err := s.ledger.AddReplicas(ctx, ref.ID, written); err != nil {
+		// A nugget keeps the layout it was first written with, so content
+		// shared with another bucket is stored once whatever its class.
+		var serr error
+		if layout.ECData > 0 {
+			var written []ledger.ShardLoc
+			written, serr = s.cluster.StoreEC(ctx, ref.ID, data, layout.Shards, layout.ECData, layout.ECParity, 0, placer)
+			err = s.ledger.AddShards(ctx, ref.ID, written)
+		} else {
+			var written []string
+			written, serr = s.cluster.Store(ctx, ref.ID, data, layout.Replicas, replicas, quorum, placer)
+			err = s.ledger.AddReplicas(ctx, ref.ID, written)
+		}
+		// Every copy or shard that landed is recorded, even on failure, so Tailings can find it.
+		if err != nil {
 			return nil, err
 		}
 		if serr != nil {

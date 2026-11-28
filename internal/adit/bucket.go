@@ -6,9 +6,12 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/404khai/lode/internal/ec"
 	"github.com/404khai/lode/internal/ledger"
+	"github.com/404khai/lode/internal/survey"
 )
 
 const maxXMLBody = 1 << 20
@@ -75,15 +78,11 @@ func (s *Server) createBucket(req *request) error {
 	if aerr := checkCannedACL(req.r); aerr != nil {
 		return aerr
 	}
-	replication := 0
-	if v := req.r.Header.Get("X-Lode-Replication"); v != "" {
-		n, perr := strconv.Atoi(v)
-		if perr != nil || n < 1 || n > 16 {
-			return errf(http.StatusBadRequest, "InvalidArgument", "x-lode-replication must be between 1 and 16")
-		}
-		replication = n
+	cfg, aerr := bucketConfig(req.r)
+	if aerr != nil {
+		return aerr
 	}
-	err := s.ledger.CreateBucket(req.r.Context(), req.bucket, replication)
+	err := s.ledger.CreateBucket(req.r.Context(), req.bucket, cfg)
 	// In us-east-1, S3 answers 200 when you re-create a bucket you own.
 	if errors.Is(err, ledger.ErrBucketExists) && s.region == "us-east-1" {
 		err = nil
@@ -95,6 +94,53 @@ func (s *Server) createBucket(req *request) error {
 	req.w.Header().Set("Location", "/"+req.bucket)
 	req.w.WriteHeader(http.StatusOK)
 	return nil
+}
+
+// bucketConfig reads Lode's bucket options from CreateBucket headers:
+//
+//	x-lode-replication: N          copies per nugget (replicated class)
+//	x-lode-storage-class: ec:K+M   Reed-Solomon with K data and M parity shards
+//	x-lode-placement: hrw | zone-spread | capacity-weighted | pinned:v1,v2,...
+func bucketConfig(r *http.Request) (ledger.BucketConfig, *apiError) {
+	var cfg ledger.BucketConfig
+	bad := func(format string, args ...any) *apiError {
+		return errf(http.StatusBadRequest, "InvalidArgument", format, args...)
+	}
+	if v := r.Header.Get("X-Lode-Replication"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 16 {
+			return cfg, bad("x-lode-replication must be between 1 and 16")
+		}
+		cfg.Replication = n
+	}
+	if v := strings.ToLower(r.Header.Get("X-Lode-Storage-Class")); v != "" && v != "replicated" {
+		spec, ok := strings.CutPrefix(v, "ec:")
+		ks, ms, ok2 := strings.Cut(spec, "+")
+		k, e1 := strconv.Atoi(ks)
+		m, e2 := strconv.Atoi(ms)
+		if !ok || !ok2 || e1 != nil || e2 != nil || ec.Validate(k, m) != nil {
+			return cfg, bad("x-lode-storage-class must be 'replicated' or 'ec:K+M' with K,M >= 1 and K+M <= %d", ec.MaxShards)
+		}
+		if cfg.Replication > 0 {
+			return cfg, bad("x-lode-replication and an erasure-coded storage class are mutually exclusive")
+		}
+		cfg.ECData, cfg.ECParity = k, m
+	}
+	if v := r.Header.Get("X-Lode-Placement"); v != "" {
+		name, list, _ := strings.Cut(v, ":")
+		if list != "" {
+			for _, p := range strings.Split(list, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					cfg.Pinned = append(cfg.Pinned, p)
+				}
+			}
+		}
+		if _, err := survey.ByName(name, cfg.Pinned); err != nil {
+			return cfg, bad("%s", err.Error())
+		}
+		cfg.Placement = name
+	}
+	return cfg, nil
 }
 
 func (s *Server) deleteBucket(req *request) error {

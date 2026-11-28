@@ -28,6 +28,7 @@ import (
 	"github.com/404khai/lode/internal/logging"
 	"github.com/404khai/lode/internal/nugget"
 	"github.com/404khai/lode/internal/smelter"
+	"github.com/404khai/lode/internal/survey"
 	"github.com/404khai/lode/internal/tailings"
 	"github.com/404khai/lode/internal/version"
 )
@@ -122,7 +123,7 @@ func run() error {
 	srv := adit.New(adit.Options{
 		Logger: log, Registerer: reg, Ledger: led, Cluster: veins, Events: bus,
 		Region: cfg.Adit.Region, Credentials: creds,
-		Replication: cfg.Adit.Replication, WriteQuorum: cfg.Adit.WriteQuorum,
+		Replication: cfg.Adit.Replication, WriteQuorum: cfg.Adit.WriteQuorum, Placement: cfg.Adit.Placement,
 	})
 
 	gc := tailings.New(tailings.Options{
@@ -142,6 +143,18 @@ func run() error {
 	})
 	go detector.Run(ctx)
 	go repair.Run(ctx)
+	if cfg.Adit.Rebalance > 0 {
+		placer, err := survey.ByName(cfg.Adit.Placement, nil)
+		if err != nil {
+			return err
+		}
+		rb := smelter.NewRebalancer(smelter.RebalanceOptions{
+			Ledger: led, Cluster: veins, Logger: log.With("component", "rebalancer"), Registerer: reg, Events: bus,
+			Strategy: placer, DefaultReplication: cfg.Adit.Replication, BandwidthBytes: cfg.Smelter.BandwidthBytes,
+			Interval: cfg.Adit.Rebalance,
+		})
+		go rb.Run(ctx)
+	}
 
 	gcDone := make(chan struct{})
 	go func() { defer close(gcDone); gc.Run(ctx) }()

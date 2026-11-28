@@ -8,7 +8,7 @@ Status: **self-healing replicated object store: 3 copies across zones, failure d
 ## Quick start
 
 ```bash
-make up                       # postgres + 4 veins + adit on :9000 (metrics/health on :9090)
+make up                       # postgres + 6 veins + adit on :9000 (metrics/health on :9090)
 export AWS_ACCESS_KEY_ID=lode AWS_SECRET_ACCESS_KEY=lodesecret AWS_DEFAULT_REGION=us-east-1
 aws --endpoint-url http://localhost:9000 s3 mb s3://photos
 aws --endpoint-url http://localhost:9000 s3 cp ./cat.jpg s3://photos/
@@ -32,6 +32,10 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
 - Cluster: `lode-vein` storage nodes over gRPC. Each nugget is written to 3 veins (spread over
   zones, then hosts) and acknowledged after 2 are durable; reads fail over between replicas and
   re-verify every copy. Per-bucket replication: `x-lode-replication: N` on CreateBucket.
+- Erasure coding: `lode bucket create photos -ec 4+2` (or `x-lode-storage-class: ec:4+2` on
+  CreateBucket) stores each nugget as 4 data + 2 parity shards on 6 veins: 1.5x overhead, any two
+  veins can be lost. Placement per bucket: `hrw`, `zone-spread`, `capacity-weighted`, `pinned:...`.
+  The rebalancer moves ~1/N of data when a vein joins.
 - Healing: Canary (phi-accrual) marks silent veins suspect then down; Smelter re-replicates
   everything they held; Assay scrubs every vein and repairs corrupt copies. Operate with
   `lode veins`, `lode vein drain <id>`, `lode vein remove <id>`, `lode repairs`.
@@ -51,7 +55,7 @@ Conditional writes (`If-Match` / `If-None-Match`) on PUT, Copy and Complete.
 ```bash
 make build test lint
 LODE_TEST_DSN=postgres://localhost/lode_test make test   # include Postgres-backed tests
-make up && make e2e && make corruption && make replication && make chaos
+make up && make e2e && make corruption && make replication && make erasure && make chaos
 ```
 
 Licensed under the [Apache License 2.0](LICENSE).

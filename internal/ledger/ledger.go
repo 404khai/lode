@@ -84,10 +84,19 @@ const (
 )
 
 type Bucket struct {
-	Name        string
-	CreatedAt   time.Time
-	Versioning  string // "", Enabled or Suspended
-	Replication int    // replicas per nugget; 0 = cluster default
+	Name       string
+	CreatedAt  time.Time
+	Versioning string // "", Enabled or Suspended
+	BucketConfig
+}
+
+// BucketConfig is a bucket's storage class and placement.
+type BucketConfig struct {
+	Replication int      // replicas per nugget; 0 = cluster default
+	ECData      int      // k data shards; 0 = replicated
+	ECParity    int      // m parity shards
+	Placement   string   // Survey strategy; "" = cluster default
+	Pinned      []string // veins the "pinned" strategy may use
 }
 
 // NuggetRef is one entry of a manifest.
@@ -95,6 +104,22 @@ type NuggetRef struct {
 	ID       nugget.ID
 	Length   int64
 	Replicas []string // veins holding a copy, filled when reading manifests
+	// Erasure-coded layout (ECData > 0): where each shard lives.
+	ECData, ECParity int
+	Shards           []ShardLoc
+}
+
+// ShardLoc is one stored shard of an erasure-coded nugget.
+type ShardLoc struct {
+	Index int
+	ID    nugget.ID
+	Vein  string
+}
+
+// Location is one stored blob (a replica or a shard) on a vein.
+type Location struct {
+	Vein string
+	ID   nugget.ID
 }
 
 // Version is the metadata of one object version.
@@ -158,8 +183,12 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-func (l *Ledger) CreateBucket(ctx context.Context, name string, replication int) error {
-	_, err := l.pool.Exec(ctx, "INSERT INTO buckets (name, replication) VALUES ($1, $2)", name, replication)
+func (l *Ledger) CreateBucket(ctx context.Context, name string, cfg BucketConfig) error {
+	if cfg.Pinned == nil {
+		cfg.Pinned = []string{}
+	}
+	_, err := l.pool.Exec(ctx, `INSERT INTO buckets (name, replication, ec_data, ec_parity, placement, pinned)
+		VALUES ($1, $2, $3, $4, $5, $6)`, name, cfg.Replication, cfg.ECData, cfg.ECParity, cfg.Placement, cfg.Pinned)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == errUniqueViolation {
 		return ErrBucketExists
@@ -169,8 +198,9 @@ func (l *Ledger) CreateBucket(ctx context.Context, name string, replication int)
 
 func (l *Ledger) HeadBucket(ctx context.Context, name string) (Bucket, error) {
 	b := Bucket{Name: name}
-	err := l.pool.QueryRow(ctx, "SELECT created_at, versioning, replication FROM buckets WHERE name = $1", name).
-		Scan(&b.CreatedAt, &b.Versioning, &b.Replication)
+	err := l.pool.QueryRow(ctx, `SELECT created_at, versioning, replication, ec_data, ec_parity, placement, pinned
+		FROM buckets WHERE name = $1`, name).
+		Scan(&b.CreatedAt, &b.Versioning, &b.Replication, &b.ECData, &b.ECParity, &b.Placement, &b.Pinned)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrNoSuchBucket
 	}
@@ -243,25 +273,84 @@ func lockBucket(ctx context.Context, tx pgx.Tx, name string) (id int64, versioni
 }
 
 // TouchNugget records that an upload is about to write ref, so Tailings will
-// not reclaim it during the grace window, and returns the veins that already
-// hold it. Callers must touch a nugget before writing it to any vein.
-func (l *Ledger) TouchNugget(ctx context.Context, ref NuggetRef, replication int) ([]string, error) {
-	var replicas []string
+// not reclaim it during the grace window, and returns what is already stored
+// for it. A new nugget takes layout k+m (0+0 = replicated); an existing
+// nugget keeps the layout it was first written with. Callers must touch a
+// nugget before writing it to any vein.
+func (l *Ledger) TouchNugget(ctx context.Context, ref NuggetRef, replication, k, m int) (NuggetRef, error) {
+	out := NuggetRef{ID: ref.ID, Length: ref.Length}
 	err := pgx.BeginFunc(ctx, l.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO nuggets (id, length, refs, last_touched, replication) VALUES ($1, $2, 0, now(), $3)
-			ON CONFLICT (id) DO UPDATE SET last_touched = now(), replication = greatest(nuggets.replication, EXCLUDED.replication)`,
-			ref.ID[:], ref.Length, replication); err != nil {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO nuggets (id, length, refs, last_touched, replication, ec_data, ec_parity) VALUES ($1, $2, 0, now(), $3, $4, $5)
+			ON CONFLICT (id) DO UPDATE SET last_touched = now(), replication = greatest(nuggets.replication, EXCLUDED.replication)
+			RETURNING ec_data, ec_parity`,
+			ref.ID[:], ref.Length, replication, k, m).Scan(&out.ECData, &out.ECParity); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, "SELECT vein_id FROM nugget_replicas WHERE nugget = $1 ORDER BY vein_id", ref.ID[:])
-		if err != nil {
+		var err error
+		if out.Replicas, err = replicasOf(ctx, tx, ref.ID); err != nil {
 			return err
 		}
-		replicas, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		out.Shards, err = shardsOf(ctx, tx, ref.ID)
 		return err
 	})
-	return replicas, err
+	return out, err
+}
+
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func replicasOf(ctx context.Context, q querier, id nugget.ID) ([]string, error) {
+	rows, err := q.Query(ctx, "SELECT vein_id FROM nugget_replicas WHERE nugget = $1 ORDER BY vein_id", id[:])
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+func shardsOf(ctx context.Context, q querier, id nugget.ID) ([]ShardLoc, error) {
+	rows, err := q.Query(ctx, "SELECT idx, shard, vein_id FROM nugget_shards WHERE nugget = $1 ORDER BY idx, vein_id", id[:])
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, scanShard)
+}
+
+func scanShard(r pgx.CollectableRow) (ShardLoc, error) {
+	var s ShardLoc
+	var b []byte
+	if err := r.Scan(&s.Index, &b, &s.Vein); err != nil {
+		return s, err
+	}
+	id, err := nugget.FromBytes(b)
+	s.ID = id
+	return s, err
+}
+
+// AddShards records stored shards of id.
+func (l *Ledger) AddShards(ctx context.Context, id nugget.ID, shards []ShardLoc) error {
+	if len(shards) == 0 {
+		return nil
+	}
+	idx := make([]int32, len(shards))
+	ids := make([][]byte, len(shards))
+	veins := make([]string, len(shards))
+	for i, s := range shards {
+		idx[i] = int32(s.Index) // #nosec G115 -- shard index < 32
+		ids[i] = s.ID[:]
+		veins[i] = s.Vein
+	}
+	_, err := l.pool.Exec(ctx, `INSERT INTO nugget_shards (nugget, idx, shard, vein_id)
+		SELECT $1, i, s, v FROM unnest($2::int[], $3::bytea[], $4::text[]) AS t(i, s, v) ON CONFLICT DO NOTHING`,
+		id[:], idx, ids, veins)
+	return err
+}
+
+// RemoveShard forgets one stored shard.
+func (l *Ledger) RemoveShard(ctx context.Context, id nugget.ID, idx int, vein string) error {
+	_, err := l.pool.Exec(ctx, "DELETE FROM nugget_shards WHERE nugget = $1 AND idx = $2 AND vein_id = $3", id[:], idx, vein)
+	return err
 }
 
 // insertManifest stores a manifest and adds one reference per entry.
@@ -303,23 +392,57 @@ func dropManifest(ctx context.Context, tx pgx.Tx, id int64) error {
 
 func loadManifest(ctx context.Context, tx pgx.Tx, id int64) ([]NuggetRef, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT mn.nugget, mn.length, coalesce(r.veins, '{}')
+		SELECT mn.nugget, mn.length, coalesce(r.veins, '{}'), coalesce(n.ec_data, 0), coalesce(n.ec_parity, 0)
 		FROM manifest_nuggets mn
+		LEFT JOIN nuggets n ON n.id = mn.nugget
 		LEFT JOIN LATERAL (SELECT array_agg(vein_id ORDER BY vein_id) AS veins FROM nugget_replicas WHERE nugget = mn.nugget) r ON true
 		WHERE mn.manifest_id = $1 ORDER BY mn.seq`, id)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (NuggetRef, error) {
+	refs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (NuggetRef, error) {
 		var b []byte
 		var n NuggetRef
-		if err := r.Scan(&b, &n.Length, &n.Replicas); err != nil {
+		if err := r.Scan(&b, &n.Length, &n.Replicas, &n.ECData, &n.ECParity); err != nil {
 			return n, err
 		}
 		id, err := nugget.FromBytes(b)
 		n.ID = id
 		return n, err
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Shard locations for erasure-coded nuggets, in one query.
+	srows, err := tx.Query(ctx, `
+		SELECT s.nugget, s.idx, s.shard, s.vein_id FROM nugget_shards s
+		WHERE s.nugget IN (SELECT mn.nugget FROM manifest_nuggets mn JOIN nuggets n ON n.id = mn.nugget
+			WHERE mn.manifest_id = $1 AND n.ec_data > 0)
+		ORDER BY s.idx, s.vein_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	byNugget := map[nugget.ID][]ShardLoc{}
+	for srows.Next() {
+		var nb, sb []byte
+		var loc ShardLoc
+		if err := srows.Scan(&nb, &loc.Index, &sb, &loc.Vein); err != nil {
+			srows.Close()
+			return nil, err
+		}
+		nid, _ := nugget.FromBytes(nb)
+		loc.ID, _ = nugget.FromBytes(sb)
+		byNugget[nid] = append(byNugget[nid], loc)
+	}
+	if err := srows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range refs {
+		if refs[i].ECData > 0 {
+			refs[i].Shards = byNugget[refs[i].ID]
+		}
+	}
+	return refs, nil
 }
 
 // lockObject returns the object row for key, creating it if create is set.

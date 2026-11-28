@@ -202,7 +202,8 @@ func (c *Client) availableLocked() []survey.Node {
 	var nodes []survey.Node
 	for _, m := range c.members {
 		if c.usable(m, now) {
-			nodes = append(nodes, survey.Node{ID: m.info.ID, Zone: m.info.Zone, Host: m.info.Host})
+			nodes = append(nodes, survey.Node{ID: m.info.ID, Zone: m.info.Zone, Host: m.info.Host,
+				Capacity: m.info.CapacityBytes, Used: m.info.UsedBytes})
 		}
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
@@ -382,7 +383,7 @@ func (c *Client) Delete(ctx context.Context, veinID string, id nugget.ID) (err e
 // veins that already hold it. It succeeds once at least `quorum` copies are
 // durable and returns the veins newly written. Fewer than `replicas` copies
 // is a degraded write that repair (Smelter) will top up.
-func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing []string, replicas, quorum int) ([]string, error) {
+func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing []string, replicas, quorum int, placer survey.Strategy) ([]string, error) {
 	avail := c.Available()
 	isAvail := map[string]bool{}
 	for _, n := range avail {
@@ -401,7 +402,7 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 		return nil, nil
 	}
 	var targets []string
-	for _, n := range survey.Place(id, len(avail), avail) {
+	for _, n := range placer.Place(id, len(avail), avail) {
 		if len(targets) == replicas-held {
 			break
 		}
@@ -446,11 +447,20 @@ func (c *Client) Store(ctx context.Context, id nugget.ID, data []byte, existing 
 	return written, nil
 }
 
-// Read returns ref's bytes from the best replica: available veins first,
+// Read returns ref's bytes: from the best replica, or for an erasure-coded
+// nugget by reading (and if needed reconstructing from) its shards.
+func (c *Client) Read(ctx context.Context, ref ledger.NuggetRef) ([]byte, error) {
+	if ref.ECData > 0 {
+		return c.readEC(ctx, ref)
+	}
+	return c.readReplicated(ctx, ref)
+}
+
+// readReplicated returns ref's bytes from the best replica: available veins first,
 // lowest read latency first, falling back through every replica. If every
 // replica was unreachable, it tries once more waiting briefly for
 // reconnecting veins (one may just have restarted).
-func (c *Client) Read(ctx context.Context, ref ledger.NuggetRef) ([]byte, error) {
+func (c *Client) readReplicated(ctx context.Context, ref ledger.NuggetRef) ([]byte, error) {
 	order := c.readOrder(ref.Replicas)
 	var errs []error
 	corrupt, attempts := 0, 0

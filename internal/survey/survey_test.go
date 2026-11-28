@@ -81,3 +81,41 @@ func TestRemovalIsMinimalDisruption(t *testing.T) {
 		t.Fatalf("moved %d of 4000", moved)
 	}
 }
+
+func TestCapacityWeightedFollowsFreeSpace(t *testing.T) {
+	nodes := []Node{{ID: "big", Capacity: 300, Zone: "a"}, {ID: "small", Capacity: 100, Zone: "b"}}
+	s, _ := ByName(CapacityWeighted, nil)
+	count := map[string]int{}
+	for i := range 8000 {
+		count[s.Place(id(i), 1, nodes)[0].ID]++
+	}
+	ratio := float64(count["big"]) / float64(count["small"])
+	if ratio < 2.5 || ratio > 3.5 {
+		t.Fatalf("big:small = %.2f, want ~3", ratio)
+	}
+}
+
+func TestStrategies(t *testing.T) {
+	nodes := cluster()
+	p, err := ByName(Pinned, []string{"v1", "v4", "v6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 200 {
+		for _, n := range p.Place(id(i), 3, nodes) {
+			if n.ID != "v1" && n.ID != "v4" && n.ID != "v6" {
+				t.Fatalf("pinned placed on %s", n.ID)
+			}
+		}
+	}
+	h, _ := ByName(HRW, nil)
+	if got := h.Place(id(1), 3, nodes); len(got) != 3 || got[0] != Rank(id(1), nodes)[0] {
+		t.Fatal("hrw is not the rank prefix")
+	}
+	if _, err := ByName("nope", nil); err == nil {
+		t.Fatal("unknown strategy accepted")
+	}
+	if _, err := ByName(Pinned, nil); err == nil {
+		t.Fatal("pinned with no veins accepted")
+	}
+}

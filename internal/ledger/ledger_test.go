@@ -74,10 +74,10 @@ func refs(t *testing.T, l *Ledger, data string) int64 {
 func TestBuckets(t *testing.T) {
 	l := newTestLedger(t)
 	ctx := context.Background()
-	if err := l.CreateBucket(ctx, "b1", 0); err != nil {
+	if err := l.CreateBucket(ctx, "b1", BucketConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.CreateBucket(ctx, "b1", 0); !errors.Is(err, ErrBucketExists) {
+	if err := l.CreateBucket(ctx, "b1", BucketConfig{}); !errors.Is(err, ErrBucketExists) {
 		t.Fatalf("want ErrBucketExists, got %v", err)
 	}
 	if _, err := l.PutObject(ctx, "b1", "k", version("x"), Condition{}); err != nil {
@@ -114,7 +114,7 @@ func TestObjectLifecycleAndRefs(t *testing.T) {
 	if _, err := l.PutObject(ctx, "missing", "k", version("x"), Condition{}); !errors.Is(err, ErrNoSuchBucket) {
 		t.Fatalf("want ErrNoSuchBucket, got %v", err)
 	}
-	_ = l.CreateBucket(ctx, "b", 0)
+	_ = l.CreateBucket(ctx, "b", BucketConfig{})
 
 	res, err := l.PutObject(ctx, "b", "k", version("a", "b", "a"), Condition{})
 	if err != nil || res.VersionID != NullVersion || res.Versioning != "" {
@@ -157,7 +157,7 @@ func TestObjectLifecycleAndRefs(t *testing.T) {
 func TestVersioning(t *testing.T) {
 	l := newTestLedger(t)
 	ctx := context.Background()
-	_ = l.CreateBucket(ctx, "v", 0)
+	_ = l.CreateBucket(ctx, "v", BucketConfig{})
 	if _, err := l.PutObject(ctx, "v", "k", version("pre"), Condition{}); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestVersioning(t *testing.T) {
 func TestListObjects(t *testing.T) {
 	l := newTestLedger(t)
 	ctx := context.Background()
-	_ = l.CreateBucket(ctx, "b", 0)
+	_ = l.CreateBucket(ctx, "b", BucketConfig{})
 	for _, k := range []string{"a/1", "a/2", "b", "B", "a/é"} {
 		if _, err := l.PutObject(ctx, "b", k, version(k), Condition{}); err != nil {
 			t.Fatal(err)
@@ -265,7 +265,7 @@ func part(n int, data ...string) Part {
 func TestMultipart(t *testing.T) {
 	l := newTestLedger(t)
 	ctx := context.Background()
-	_ = l.CreateBucket(ctx, "m", 0)
+	_ = l.CreateBucket(ctx, "m", BucketConfig{})
 	if _, err := l.CreateUpload(ctx, "nope", "k", Upload{}); !errors.Is(err, ErrNoSuchBucket) {
 		t.Fatalf("want ErrNoSuchBucket, got %v", err)
 	}
@@ -345,11 +345,11 @@ func TestMultipart(t *testing.T) {
 func TestReclaimSafety(t *testing.T) {
 	l := newTestLedger(t)
 	ctx := context.Background()
-	_ = l.CreateBucket(ctx, "g", 0)
+	_ = l.CreateBucket(ctx, "g", BucketConfig{})
 	_, _ = l.PutObject(ctx, "g", "live", version("live"), Condition{})
 	_, _ = l.PutObject(ctx, "g", "gone", version("gone"), Condition{})
 	_, _ = l.DeleteObject(ctx, "g", "gone", "")
-	_, _ = l.TouchNugget(ctx, NuggetRef{ID: nugget.Sum([]byte("inflight")), Length: 8}, 3)
+	_, _ = l.TouchNugget(ctx, NuggetRef{ID: nugget.Sum([]byte("inflight")), Length: 8}, 3, 0, 0)
 
 	future := time.Now().Add(time.Hour)
 	ids, err := l.ReclaimCandidates(ctx, future, 10)
@@ -357,7 +357,7 @@ func TestReclaimSafety(t *testing.T) {
 		t.Fatalf("candidates = %v %v", ids, err)
 	}
 	removed := 0
-	remove := func([]string) error { removed++; return nil }
+	remove := func([]Location) error { removed++; return nil }
 	if ok, err := l.ReclaimNugget(ctx, nugget.Sum([]byte("live")), future, remove); ok || err != nil || removed != 0 {
 		t.Fatalf("referenced nugget reclaimed: %v %v", ok, err)
 	}
@@ -368,7 +368,7 @@ func TestReclaimSafety(t *testing.T) {
 	if ok, err := l.ReclaimNugget(ctx, nugget.Sum([]byte("gone")), future, remove); !ok || err != nil || removed != 1 {
 		t.Fatalf("unreferenced nugget not reclaimed: %v %v", ok, err)
 	}
-	failing := func([]string) error { return errors.New("disk") }
+	failing := func([]Location) error { return errors.New("disk") }
 	if ok, err := l.ReclaimNugget(ctx, nugget.Sum([]byte("inflight")), future, failing); ok || err == nil {
 		t.Fatal("failed removal must keep the row")
 	}
@@ -393,16 +393,16 @@ func TestVeinsAndReplicas(t *testing.T) {
 		t.Fatalf("veins = %+v %v", vs, err)
 	}
 	ref := NuggetRef{ID: nugget.Sum([]byte("r")), Length: 1}
-	if have, err := l.TouchNugget(ctx, ref, 3); err != nil || len(have) != 0 {
+	if have, err := l.TouchNugget(ctx, ref, 3, 0, 0); err != nil || len(have.Replicas) != 0 {
 		t.Fatalf("touch = %v %v", have, err)
 	}
 	if err := l.AddReplicas(ctx, ref.ID, []string{"v2", "v1", "v2"}); err != nil {
 		t.Fatal(err)
 	}
-	if have, _ := l.TouchNugget(ctx, ref, 3); len(have) != 2 || have[0] != "v1" {
+	if have, _ := l.TouchNugget(ctx, ref, 3, 0, 0); len(have.Replicas) != 2 || have.Replicas[0] != "v1" {
 		t.Fatalf("replicas = %v", have)
 	}
-	_ = l.CreateBucket(ctx, "rb", 2)
+	_ = l.CreateBucket(ctx, "rb", BucketConfig{Replication: 2})
 	if b, _ := l.HeadBucket(ctx, "rb"); b.Replication != 2 {
 		t.Fatalf("replication = %d", b.Replication)
 	}
@@ -413,7 +413,12 @@ func TestVeinsAndReplicas(t *testing.T) {
 	}
 	_, _ = l.DeleteObject(ctx, "rb", "k", "")
 	var got []string
-	ok, err := l.ReclaimNugget(ctx, ref.ID, time.Now().Add(time.Hour), func(v []string) error { got = v; return nil })
+	ok, err := l.ReclaimNugget(ctx, ref.ID, time.Now().Add(time.Hour), func(v []Location) error {
+		for _, x := range v {
+			got = append(got, x.Vein)
+		}
+		return nil
+	})
 	if !ok || err != nil || len(got) != 2 {
 		t.Fatalf("reclaim veins = %v %v %v", got, ok, err)
 	}
